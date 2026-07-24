@@ -20,7 +20,7 @@ The shared typed API client every frontend/mobile block imports instead of hand-
 - What it is / isn't
 - How `client-generate` works
 - Configuration
-- Cookie mode (web)
+- Auth modes
 - Access-token injection (`getAccessToken`)
 - Bundler-only package
 - The mutator's response shape
@@ -74,48 +74,70 @@ configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "" });
 
 A trailing slash on `baseUrl` is trimmed automatically. Leaving it unconfigured (or passing `baseUrl: ""`) resolves every request to a same-origin relative URL — a sane default behind a reverse proxy that forwards API paths to the backend, and handy for local dev.
 
-## Cookie mode (web)
-By **default** the client is in **bearer mode**: it sends whatever `Authorization` header the caller sets and touches no cookies — the right shape for Expo/React Native, which keeps its tokens in SecureStore. Mobile and every existing `configureApiClient({ baseUrl })` call site are unchanged.
+## Auth modes
+`configureApiClient({ baseUrl, mode })` selects how this client authenticates — three modes, picked by RUNTIME, not preference:
 
-A **browser** consumer can opt into **cookie mode** to match the backend's web auth posture (see `references/wiring/auth-end-to-end.md` for the full end-to-end flow), where the refresh token lives in an `HttpOnly` cookie the JS can't read and only the short-lived access token sits in memory:
+| `mode` | Who | Credential | CSRF |
+| --- | --- | --- | --- |
+| `"session"` | **Every browser consumer — the preferred choice.** | Opaque `HttpOnly; Path=/` `session_id` cookie. No token, ever. | Echoed on every unsafe method. |
+| `"bearer"` (the library default) | Expo/React Native, service-to-service. | Access token in memory (`Authorization: Bearer`), refresh in SecureStore. | None — no ambient credential. |
+| `"cookie"` | Superseded — kept for a project mid-migration. | JWT refresh in an `HttpOnly; Path=/auth` cookie, access token still in memory. | Echoed on `/auth/refresh` + `/auth/logout` only. |
 
 ```ts
-// Vite (web) — apps/web/src/main.tsx, before rendering
+// Vite/Next (web) — before rendering, the browser default
 import { configureApiClient } from "@repo/api-client";
-configureApiClient({
-  baseUrl: import.meta.env.VITE_API_BASE_URL ?? "",
-  cookieMode: true, // opt in — defaults to false (bearer)
-});
+configureApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL ?? "", mode: "session" });
 ```
 
-`cookieMode: true` turns on three things in `src/mutator.ts`, and nothing else changes about the mutator's response shape:
+```ts
+// Expo (mobile) — App.tsx, before rendering; explicit for clarity
+// (bearer is the library default, so omitting `mode` does the same thing)
+import { configureApiClient } from "@repo/api-client";
+configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "", mode: "bearer" });
+```
 
-1. **`credentials: "include"` on every request** — so the browser attaches the backend's cookies: the `HttpOnly; Secure; SameSite=Lax; Path=/auth` `refresh_token` cookie and the non-HttpOnly `csrf_token` cookie. (Both are path-scoped by the backend, so including credentials globally is harmless on non-auth paths.)
-2. **`X-Auth-Mode: cookie` on `POST /auth/login`** — this header is how the backend selects cookie mode at login; absent or any other value means bearer. In cookie mode login returns `refresh_token: ""` in the body (the real refresh JWT is set as the `HttpOnly` cookie instead).
-3. **Double-submit CSRF echo on `POST /auth/refresh` and `POST /auth/logout`** — the mutator reads the non-HttpOnly `csrf_token` cookie from `document.cookie` and sends its value back as the `X-CSRF-Token` header, which the backend checks equals the cookie. It won't clobber a caller-supplied `X-CSRF-Token`.
+**Why `"session"` is preferred but not the library default.** This one module is shared by web and native consumers, and it cannot detect which runtime it's in — so the default has to be the mode that's safe to get wrong. A browser left on the `"bearer"` default simply fails to authenticate against a session-mode backend (a loud, obvious failure); a native app switched to `"session"` by a copy-pasted config would rely on cookie semantics Expo's HTTP client doesn't properly provide (a subtle one). Every web template in this catalog therefore passes `mode: "session"` explicitly — see `references/wiring/auth-end-to-end.md` for the full end-to-end flow and the reasoning behind preferring sessions for browsers at all.
 
-**Security note.** The split is deliberate: the **access token stays in memory** and travels in the `Authorization` header (same as bearer mode); the **refresh token is never readable by JS** (it's in the `HttpOnly` cookie), which is what neutralizes token theft via XSS. CSRF is the tradeoff a cookie brings — the browser attaches the refresh cookie automatically on any same-site request — so the state-changing cookie-auth endpoints are protected by the **double-submit** check: an attacker's forged cross-site request can't read the `csrf_token` cookie to echo it in the header, and `SameSite=Lax` blocks it besides. Reading `csrf_token` needs `document`, so the echo is a **safe no-op under SSR / React Native** (no `document`) — correct, because those are bearer-mode targets that never receive a CSRF cookie. Cookie mode also requires the backend's CORS to name **explicit origins with credentials enabled — never a `*` wildcard** (a wildcard origin is incompatible with `credentials: "include"`); see `references/security/secure-baseline.md` and the auth component's README.
+### Session mode
+1. **`credentials: "include"` on every request** — the browser attaches the `HttpOnly; Secure; SameSite=Lax; Path=/` `session_id` cookie and the non-HttpOnly `csrf_token` cookie.
+2. **No `X-Auth-Mode` header at login** — session IS the backend's default, so there's nothing to declare.
+3. **Double-submit CSRF echo on EVERY unsafe method** (`POST`/`PUT`/`PATCH`/`DELETE`), not just the auth endpoints — because the session cookie is `Path=/`, every state-changing endpoint is a CSRF target, unlike cookie mode's `Path=/auth`-scoped refresh cookie. `POST /auth/login` is exempt (the backend doesn't check it there either — see the auth component's README). Won't clobber a caller-supplied `X-CSRF-Token`.
+4. **No `Authorization` header, ever** — `getAccessToken` is ignored entirely in this mode (see below). There is no token to inject; that's the property that leaves an XSS payload nothing to exfiltrate.
+
+The login response body is `{ access_token: "", refresh_token: "", token_type: "session" }` — genuinely empty, not a placeholder. Check `token_type` to know which mode a response came from.
+
+### Cookie mode (superseded)
+`mode: "cookie"` (or the legacy `cookieMode: true`, still accepted — see below) turns on three things, and nothing else changes about the mutator's response shape:
+
+1. **`credentials: "include"` on every request** — so the browser attaches the `HttpOnly; Secure; SameSite=Lax; Path=/auth` `refresh_token` cookie and the non-HttpOnly `csrf_token` cookie.
+2. **`X-Auth-Mode: cookie` on `POST /auth/login`** — opts OUT of the backend's session default. Login returns `refresh_token: ""` in the body (the real refresh JWT is set as the `HttpOnly` cookie instead); the access token is still returned in the body and still travels in `Authorization`.
+3. **Double-submit CSRF echo on `POST /auth/refresh` and `POST /auth/logout` only** — reads `csrf_token` from `document.cookie`, sends it back as `X-CSRF-Token`. Won't clobber a caller-supplied header.
+
+**Migrating off cookie mode:** change `mode: "cookie"` to `mode: "session"` (or drop `cookieMode: true` entirely once `mode: "session"` is set) and stop wiring `getAccessToken` for that consumer — session mode ignores it. No other application code changes; the response shape difference (`token_type`) is the only thing to check for.
+
+**`cookieMode: true` still works, mapped to `mode: "cookie"`**, so an existing call site keeps its prior behavior unchanged until it's migrated. An explicit `mode` always wins if both are passed.
+
+**Security notes common to both cookie-bearing modes.** CSRF is the tradeoff a cookie brings — the browser attaches it automatically on any same-site request — so the guarded endpoints run the **double-submit** check: an attacker's forged cross-site request can't read the `csrf_token` cookie to echo it in the header, and `SameSite=Lax` blocks it besides. Reading `csrf_token` needs `document`, so the echo is a **safe no-op under SSR / React Native** (no `document`) — correct, because those are bearer-mode targets that never receive a CSRF cookie. Both modes require the backend's CORS to name **explicit origins with credentials enabled — never a `*` wildcard** (incompatible with `credentials: "include"`); see `references/security/secure-baseline.md` and the auth component's README.
 
 ## Access-token injection (`getAccessToken`)
-Both modes send the short-lived access token as an `Authorization: Bearer` header — but by **default** the client sets that header for no one: it forwards whatever `Authorization` the caller passes and nothing more (bearer mode's original behavior). A consumer that keeps the access token in memory can instead register a getter once, and the mutator injects the header on every generated call automatically:
+Bearer and cookie mode send the short-lived access token as an `Authorization: Bearer` header — but by **default** the client sets that header for no one: it forwards whatever `Authorization` the caller passes and nothing more. A consumer that keeps the access token in memory can instead register a getter once, and the mutator injects the header on every generated call automatically:
 
 ```ts
-// The token lives in the consumer's memory (e.g. @repo/web-shared's
-// AuthProvider updates a ref; getAccessToken reads it). Wire it once:
+// The token lives in the consumer's memory (e.g. Expo's own SecureStore-
+// backed auth state). Wire it once:
 import { configureApiClient } from "@repo/api-client";
-import { getAccessToken } from "@repo/web-shared";
 configureApiClient({
-  baseUrl: import.meta.env.VITE_API_BASE_URL ?? "",
-  cookieMode: true,       // web posture
+  baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "",
+  mode: "bearer",
   getAccessToken,         // () => string | null
 });
 ```
 
 Semantics (see `src/mutator.ts`'s `ApiClientConfig.getAccessToken`):
-- **Default-off.** Omit it and the mutator sets no `Authorization` header itself — byte-for-byte the prior behavior, so mobile/Expo (which sets its own bearer header from SecureStore) and every existing call site are unchanged.
+- **Default-off.** Omit it and the mutator sets no `Authorization` header itself.
 - **Injects only a real token.** The getter returning `null` or `""` injects nothing (logged-out state).
 - **Never clobbers a caller header.** A per-call `Authorization` still wins, so an explicit override (or a different token for one request) is always honored.
-- **Independent of `cookieMode`.** It runs in both modes; cookie mode governs the *refresh* token transport and CSRF, this governs the *access* token header. `@repo/web-shared`'s `AuthProvider` is the intended producer of the getter — see that package's README.
+- **Runs in bearer and cookie mode; IGNORED in session mode.** Session mode holds no token — a stray `Authorization` header would be meaningless at best, and against a backend that resolves either credential (see the auth component's `build_get_current_principal_either`), actively ambiguous about which one authenticated the request.
 
 ## Bundler-only package
 `dist/` (this package's build output) uses extensionless relative imports, matching what orval generates — not the explicit `.js`-suffixed imports Node's own ESM loader (`NodeNext` resolution) requires. That's intentional (see "Materialized-location paths" below) and it means this package only resolves correctly under a bundler with Node-style extensionless resolution — Vite, Metro, webpack — not `node dist/index.js` directly. Don't add a build step to emit extensions; consume it from a bundler-based app as designed.

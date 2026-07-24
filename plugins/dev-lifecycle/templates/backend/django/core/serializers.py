@@ -190,10 +190,19 @@ class TokenResponseSerializer(serializers.Serializer):
 
 
 class PrincipalOutSerializer(serializers.Serializer):
-    """Matches `openapi.json`'s `PrincipalOut`. See `TokenResponseSerializer`."""
+    """Matches `openapi.json`'s `PrincipalOut`. See `TokenResponseSerializer`.
+
+    **`roles` is on the wire now** -- see backend/fastapi's own
+    `PrincipalOut` docstring for the full rationale: session mode removes
+    the access JWT a browser client could previously decode locally for a
+    client-side role check, so `/auth/me` has to carry the answer itself.
+    UI-only and non-authoritative; every real admin action is still
+    enforced server-side by `has_role`/`require_roles_either`, which read
+    the current principal's roles fresh on every request."""
 
     id = serializers.UUIDField()
     email = serializers.CharField()
+    roles = serializers.ListField(child=serializers.CharField(), default=list)
 
 
 # ---------------------------------------------------------------------------

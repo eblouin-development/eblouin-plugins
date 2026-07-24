@@ -847,7 +847,9 @@ class MeView(APIView):
         user = async_to_sync(DjangoUserStore().get_by_id)(claims.sub)
         if user is None:
             raise InvalidToken("This token no longer maps to an active user.")
-        principal = PrincipalOutSerializer({"id": uuid.UUID(user.id), "email": user.email})
+        principal = PrincipalOutSerializer(
+            {"id": uuid.UUID(user.id), "email": user.email, "roles": list(user.roles)}
+        )
         return Response(principal.data)
 
 

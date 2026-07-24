@@ -3798,6 +3798,14 @@
           "email": {
             "type": "string",
             "title": "Email"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -3806,7 +3814,8 @@
           "id",
           "email"
         ],
-        "title": "PrincipalOut"
+        "title": "PrincipalOut",
+        "description": "`GET /auth/me`'s response body.\n\n**`roles` is on the wire now**, where earlier stages deliberately left\nit off (\"no `roles` on the wire in this stage; RBAC's wire surface is\nStage 5d\"). It is added now because session mode removes the one thing\na browser client could previously use for a client-side role check: an\naccess JWT to decode locally. `_core.AccessClaims.roles` was a\nconvenient source for that in bearer mode; a session client has no\ntoken of any kind to read a claim out of, so if the frontend is to make\nANY role-gated UI decision (show/hide an admin nav item, redirect a\nnon-admin away from an admin route) without a server round-trip for\nevery render, `/auth/me`'s response has to carry the answer itself.\n\nThis is UI-only and non-authoritative, same as the JWT claim it\nreplaces: every ACTUAL admin action is still enforced server-side by\n`require_roles`/`has_role`, which read the current principal's roles\nfresh on every request \u2014 a client trusting a stale `roles` array for\nanything beyond \"should I render this button\" would be a bug in the\nclient, not a security hole in the server."
       },
       "PublicBlogPostOut": {
         "properties": {

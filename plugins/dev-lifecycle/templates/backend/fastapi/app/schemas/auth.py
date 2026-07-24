@@ -100,10 +100,31 @@ class TokenResponse(BaseModel):
 
 
 class PrincipalOut(BaseModel):
+    """`GET /auth/me`'s response body.
+
+    **`roles` is on the wire now**, where earlier stages deliberately left
+    it off ("no `roles` on the wire in this stage; RBAC's wire surface is
+    Stage 5d"). It is added now because session mode removes the one thing
+    a browser client could previously use for a client-side role check: an
+    access JWT to decode locally. `_core.AccessClaims.roles` was a
+    convenient source for that in bearer mode; a session client has no
+    token of any kind to read a claim out of, so if the frontend is to make
+    ANY role-gated UI decision (show/hide an admin nav item, redirect a
+    non-admin away from an admin route) without a server round-trip for
+    every render, `/auth/me`'s response has to carry the answer itself.
+
+    This is UI-only and non-authoritative, same as the JWT claim it
+    replaces: every ACTUAL admin action is still enforced server-side by
+    `require_roles`/`has_role`, which read the current principal's roles
+    fresh on every request — a client trusting a stale `roles` array for
+    anything beyond "should I render this button" would be a bug in the
+    client, not a security hole in the server."""
+
     model_config = ConfigDict(extra="forbid")
 
     id: uuid.UUID
     email: str
+    roles: list[str] = []
 
 
 # --- Account lifecycle (Stage 5c, #45): verify-email / request-password-reset

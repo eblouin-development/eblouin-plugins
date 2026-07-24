@@ -456,7 +456,7 @@ async def me(
     user = await SqlAlchemyUserStore(db).get_by_id(principal.sub)
     if user is None:
         raise InvalidToken("This session no longer maps to an active user.")
-    return PrincipalOut(id=uuid.UUID(user.id), email=user.email)
+    return PrincipalOut(id=uuid.UUID(user.id), email=user.email, roles=list(user.roles))
 
 
 # ---------------------------------------------------------------------------
