@@ -4,9 +4,12 @@
  * the generated client, so the engine (and its test) never pull it in.
  *
  * BEARER mode: login/refresh/logout carry their token in the request BODY —
- * no cookie, no CSRF, no `X-Auth-Mode` header. That is the default the shared
- * mutator is in when `configureApiClient` is called without `cookieMode`
- * (see app/_layout.tsx), which is asserted-correct for native.
+ * no cookie, no CSRF. `app/_layout.tsx`'s `configureApiClient({ mode: "bearer"
+ * })` is what selects this path — EXPLICITLY, now that the backend's own
+ * default is server-side sessions rather than bearer JWTs; that call sends
+ * `X-Auth-Mode: bearer` on login so the backend mints the real access/refresh
+ * token pair this file's functions expect back, instead of setting a session
+ * cookie this app has no use for.
  */
 import {
   loginAuthLoginPost,

@@ -1,7 +1,8 @@
 /**
  * Root layout = app entry. It runs before any screen and is the one place to:
- *   1. configure @repo/api-client (ONCE, in BEARER mode — cookieMode omitted;
- *      cookie mode is never enabled on native, per the auth wiring);
+ *   1. configure @repo/api-client (ONCE, in BEARER mode, EXPLICITLY —
+ *      `mode: "bearer"`; cookie/session mode is never enabled on native, per
+ *      the auth wiring);
  *   2. mount the app-wide providers (SafeAreaProvider, React Query, AuthProvider);
  *   3. hold the top-level navigator, showing a splash while auth state resolves.
  *
@@ -18,11 +19,20 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AuthProvider } from "../src/auth/AuthProvider";
 import { useAuth } from "../src/auth/useAuth";
 
-// Bearer mode: the mutator attaches whatever Authorization header the caller
+// Bearer mode, EXPLICITLY. The backend's default is now server-side SESSIONS
+// (an HttpOnly cookie — see references/wiring/auth-end-to-end.md), which is
+// the wrong posture for a native client: Expo has no cookie jar suited to it
+// and a real OS-backed secret store (SecureStore) for the bearer path instead,
+// which is what src/auth/authEngine.ts actually uses. `mode: "bearer"` is what
+// makes login send `X-Auth-Mode: bearer`, opting OUT of that default — leaving
+// it unset (as an earlier, pre-session-default version of this file did, back
+// when bearer WAS the backend's only mode) would silently authenticate this
+// app against a session cookie it cannot store, with `login()` returning empty
+// token fields. The mutator attaches whatever Authorization header the caller
 // sets (the auth engine sets `Bearer <access>`) and touches no cookies. The
 // base URL is inlined from EXPO_PUBLIC_API_BASE_URL at build time; unset → ""
-// (same-origin relative URLs). See the api-client README's "Configuration".
-configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "" });
+// (same-origin relative URLs). See the api-client README's "Auth modes".
+configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "", mode: "bearer" });
 
 const queryClient = new QueryClient();
 

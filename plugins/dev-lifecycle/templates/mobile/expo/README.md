@@ -30,7 +30,7 @@ An Expo-managed React Native app (Expo Router, file-based navigation) that scaff
 
 **NEEDS**
 - **Env vars** — `EXPO_PUBLIC_API_BASE_URL`: the backend origin the app talks to, read at app entry (`app/_layout.tsx`) as `process.env.EXPO_PUBLIC_API_BASE_URL` and passed to `configureApiClient({ baseUrl })`. Expo inlines only `EXPO_PUBLIC_*` vars into the bundle, at **build** time — this is **not a secret** (it ships in the binary); never put a real secret in an `EXPO_PUBLIC_*` var.
-- **Upstream API contract** — `@repo/api-client`, the generated typed React Query client, configured in **bearer mode** (`cookieMode` omitted). It consumes the backend's `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` operations (the auth wiring's mobile half).
+- **Upstream API contract** — `@repo/api-client`, the generated typed React Query client, configured in **bearer mode explicitly** (`mode: "bearer"` — the backend's own default is now server-side sessions for browser clients, so this app must opt out rather than rely on an omitted flag). It consumes the backend's `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` operations (the auth wiring's mobile half).
 - **Shared workspace packages** — `@repo/api-client` (`workspace:*`). This app supplies `react` and `@tanstack/react-query` itself, satisfying that package's peer dependencies.
 - **Native** — `expo-secure-store` (iOS Keychain / Android Keystore) for the refresh token; a development build or EAS build for any run on a device/simulator (the stock Expo Go client is fine for the pure-JS layer, but this app's native module set is device-build territory once composed into a real project).
 
