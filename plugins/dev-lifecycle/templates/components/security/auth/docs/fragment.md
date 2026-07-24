@@ -2,40 +2,70 @@
 
 ## Setup
 Copy the `auth/` directory into `app/core/security/auth/` (or, on the
-Django track, `core/security/auth/`). Ships `_core.py` — a
-framework-neutral `PasswordService` (Argon2id) + `TokenService` (PyJWT
-HS256 access/refresh) + `AuthService` orchestrator — `_cookies.py`
+Django track, `core/security/auth/`). Ships **two authentication paths**:
+server-side sessions (the default for browser clients) and JWT
+access/refresh (for native/mobile clients and service-to-service callers).
+
+`_sessions.py` — a framework-neutral, stdlib-plus-`_core`-only
+`SessionService` over opaque, high-entropy session ids whose authority
+lives entirely in a `SessionStore` row: revocable on the next request,
+resolving roles live from `UserStore` so a privilege change takes effect
+immediately, with both a sliding `idle_ttl` and a hard `absolute_ttl`, a
+`touch_interval` write-rate bound, and `rotate()` for privilege
+boundaries. **This is what a browser client should authenticate with** —
+see this component's README's "Server-side sessions" section for the
+resolve state machine and the wiring checklist. It imports no PyJWT, so a
+session-only project takes no JWT dependency at all.
+
+`_core.py` — a framework-neutral `PasswordService` (Argon2id) +
+`TokenService` (PyJWT HS256 access/refresh) + `AuthService` orchestrator,
+including refresh rotation with reuse detection. Still required on the
+session path for `PasswordService`/`UserStore`/`AuthService.register`/
+`login`'s credential verification — a session login verifies the password
+through `AuthService` and then calls `SessionService.create(user)` instead
+of minting tokens. `_cookies.py`
 (Stage 5d, #46) — a SECOND framework-neutral file, stdlib-only, holding
 the double-submit-cookie CSRF transport (`CsrfValidationError`,
 `generate_csrf_token`, `verify_double_submit`, and the pure cookie-kwarg
-builders) a project opts into ONLY if it authenticates via cookies rather
-than bearer tokens — `fastapi.py` — the `HTTPBearer` scheme,
+builders for both the `Path=/` session cookie and the `Path=/auth` refresh
+cookie) — `fastapi.py` — `build_get_current_session_principal` (the
+session dependency factory), the `HTTPBearer` scheme,
 `build_get_current_principal` (a dependency factory resolving a bearer
-token to `AccessClaims`), `require_roles` (role-gated dependency factory),
-`AUTH_ERROR_HTTP` (exception type -> `(status, ErrorCode string)` table),
-and thin cookie/CSRF glue over `_cookies.py` (`set_auth_cookies`,
-`clear_auth_cookies`, `read_refresh_cookie`, `enforce_csrf`) — and
-`django.py` — the Django/DRF equivalent: `resolve_principal(request,
-auth_service)` and `require_roles(request, auth_service, *roles)` (both
-plain awaited helpers, since Django/DRF has no `Depends()`-style
-auto-invoked injection point to compose against), `InsufficientRole`, the
-identically-shaped `AUTH_ERROR_HTTP`, and the SAME DRF-free cookie/CSRF
-glue surface as `fastapi.py`'s own. Copy `_core.py` always, `_cookies.py`
-only if the project uses the cookie transport, and only the adapter
-file(s) your track actually uses (a FastAPI project never vendors
-`django.py`, and vice versa). Add an `__init__.py` re-exporting the
-vendored files' public surface — see backend/fastapi's `app/core/security/
-auth/__init__.py` (FastAPI track) or backend/django's `core/security/auth/
-__init__.py` (Django track) for the exact shape.
+token to `AccessClaims`), `require_roles` (one role-gated dependency
+factory that works against EITHER principal), `AUTH_ERROR_HTTP` (exception
+type -> `(status, ErrorCode string)` table), and thin cookie/CSRF glue over
+`_cookies.py` (`set_session_cookies`, `clear_session_cookies`,
+`read_session_cookie`, `set_auth_cookies`, `clear_auth_cookies`,
+`read_refresh_cookie`, `enforce_csrf`) — and `django.py` — the Django/DRF
+equivalent: `resolve_session_principal(request, session_service)` /
+`require_session_roles(...)` for the session path and
+`resolve_principal(request, auth_service)` / `require_roles(request,
+auth_service, *roles)` for the bearer path (all plain awaited helpers,
+since Django/DRF has no `Depends()`-style auto-invoked injection point to
+compose against), `InsufficientRole`, the identically-shaped
+`AUTH_ERROR_HTTP`, and the SAME DRF-free cookie/CSRF glue surface as
+`fastapi.py`'s own. Copy `_core.py` always, `_sessions.py` for the
+(default) session path, `_cookies.py` whenever either cookie transport is
+used, and only the adapter file(s) your track actually uses (a FastAPI
+project never vendors `django.py`, and vice versa). Add an `__init__.py`
+re-exporting the vendored files' public surface — see backend/fastapi's
+`app/core/security/auth/__init__.py` (FastAPI track) or backend/django's
+`core/security/auth/__init__.py` (Django track) for the exact shape.
 
-Vendoring `_core.py`+the framework adapter is NOT the whole wiring job — a
-project still needs, as its OWN (non-vendored) app code: `UserStore`/
-`RefreshTokenStore` implementations against a real ORM/DB (these import
-the app's models, so they can never be part of this vendored, framework-
-neutral component); `AuthService` construction with a real signing key
-(via `secrets-loading/`, never hardcoded — rotate per environment) and
-real TTLs at app startup; real route handlers calling `AuthService`'s
-register/login/refresh/logout/resolve_access; and an app-level exception
+Vendoring `_core.py`+`_sessions.py`+the framework adapter is NOT the whole
+wiring job — a project still needs, as its OWN (non-vendored) app code:
+`UserStore`/`SessionStore`/`RefreshTokenStore` implementations against a
+real ORM/DB (these import the app's models, so they can never be part of
+this vendored, framework-neutral component); `SessionService` construction
+with real `idle_ttl`/`absolute_ttl` values (and, if the JWT path is also
+served, `AuthService` construction with a real signing key via
+`secrets-loading/`, never hardcoded — rotate per environment) at app
+startup; real route handlers calling `AuthService.login` +
+`SessionService.create` on the session path, or `AuthService`'s
+register/login/refresh/logout/resolve_access on the JWT path; **CSRF
+enforcement on every unsafe-method route** wherever session mode is used
+(the session cookie is `Path=/`, unlike the `Path=/auth` refresh cookie);
+and an app-level exception
 handler registered for the `AuthError` base class that renders
 `AUTH_ERROR_HTTP`'s mapping as the app's own `ErrorEnvelope` (catches
 every subclass via one registration — Starlette-family frameworks walk an
@@ -90,10 +120,17 @@ pieces — no new catalog component was needed; `_oauth.py` vendors
 alongside `_core.py` exactly like `_cookies.py` already does.
 
 ## Maintenance
-`AuthService.refresh`'s reuse-detection state machine is the security-
-critical core of this component — re-run `tests/test_core.py` after any
-change to `_core.py`, especially the "reuse revokes the whole family"
-test, before shipping. `PasswordService.needs_rehash()` exists so a
+`SessionService.resolve`'s state machine and `AuthService.refresh`'s
+reuse-detection state machine are the two security-critical cores of this
+component — re-run `tests/test_sessions.py` after any change to
+`_sessions.py` (especially the revoked-session, both-deadline, live-role,
+and rotation-inherits-the-absolute-deadline tests) and `tests/test_core.py`
+after any change to `_core.py` (especially "reuse revokes the whole
+family"), before shipping. A password reset, an account deactivation, and
+a detected compromise must all call `SessionService.revoke_all_for_user`
+alongside `RefreshTokenStore.revoke_all_for_user`; a project that adds a
+new "kill this account's access" path and wires only one of the two has a
+half-revoked account. `PasswordService.needs_rehash()` exists so a
 project can tighten Argon2id's cost parameters over time and transparently
 upgrade old hashes on next successful login, rather than a bulk
 migration — wire that check into the framework adapter's login flow once

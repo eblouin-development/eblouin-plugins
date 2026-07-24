@@ -216,7 +216,7 @@ def test_csrf_cookie_max_age_passed_through_unchanged(cookies_mod):
     assert cookies_mod.build_csrf_cookie_kwargs("v", 42)["max_age"] == 42
 
 
-def test_every_cookie_is_scoped_to_the_auth_path(cookies_mod):
+def test_every_refresh_path_cookie_is_scoped_to_the_auth_path(cookies_mod):
     for kwargs in (
         cookies_mod.build_refresh_cookie_kwargs("v", 1),
         cookies_mod.build_csrf_cookie_kwargs("v", 1),
@@ -229,13 +229,130 @@ def test_every_cookie_is_scoped_to_the_auth_path(cookies_mod):
 
 
 # ---------------------------------------------------------------------------
-# Cookie-name constants
+# Session-mode cookie builders (the default browser path)
+# ---------------------------------------------------------------------------
+
+
+def test_build_session_cookie_kwargs_exact_flags(cookies_mod):
+    kwargs = cookies_mod.build_session_cookie_kwargs("raw-opaque-session-id", 86400)
+    assert kwargs == {
+        "key": "session_id",
+        "value": "raw-opaque-session-id",
+        "max_age": 86400,
+        "path": "/",
+        "httponly": True,
+        "secure": True,
+        "samesite": "lax",
+    }
+
+
+def test_build_session_csrf_cookie_kwargs_exact_flags(cookies_mod):
+    kwargs = cookies_mod.build_session_csrf_cookie_kwargs("raw-csrf-token", 86400)
+    assert kwargs == {
+        "key": "csrf_token",
+        "value": "raw-csrf-token",
+        "max_age": 86400,
+        "path": "/",
+        # The ONE deliberate difference from the session cookie: the SPA
+        # must be able to read this to echo it back as X-CSRF-Token.
+        "httponly": False,
+        "secure": True,
+        "samesite": "lax",
+    }
+
+
+def test_clear_session_cookie_kwargs_exact_flags(cookies_mod):
+    kwargs = cookies_mod.clear_session_cookie_kwargs()
+    assert kwargs == {
+        "key": "session_id",
+        "value": "",
+        "max_age": 0,
+        "path": "/",
+        "httponly": True,
+        "secure": True,
+        "samesite": "lax",
+    }
+
+
+def test_clear_session_csrf_cookie_kwargs_exact_flags(cookies_mod):
+    kwargs = cookies_mod.clear_session_csrf_cookie_kwargs()
+    assert kwargs == {
+        "key": "csrf_token",
+        "value": "",
+        "max_age": 0,
+        "path": "/",
+        "httponly": False,
+        "secure": True,
+        "samesite": "lax",
+    }
+
+
+def test_the_session_cookie_is_never_readable_from_javascript(cookies_mod):
+    # HttpOnly on both the set and the clear instruction -- the property
+    # that means an XSS payload has no credential in the JS heap to steal.
+    assert cookies_mod.build_session_cookie_kwargs("v", 1)["httponly"] is True
+    assert cookies_mod.clear_session_cookie_kwargs()["httponly"] is True
+
+
+def test_session_cookies_are_scoped_to_the_root_path(cookies_mod):
+    # Path=/ is unavoidable for a credential that authenticates every
+    # route -- and is exactly why session mode requires CSRF enforcement on
+    # every unsafe-method request rather than only on /auth/*.
+    for kwargs in (
+        cookies_mod.build_session_cookie_kwargs("v", 1),
+        cookies_mod.build_session_csrf_cookie_kwargs("v", 1),
+        cookies_mod.clear_session_cookie_kwargs(),
+        cookies_mod.clear_session_csrf_cookie_kwargs(),
+    ):
+        assert kwargs["path"] == "/"
+        assert kwargs["secure"] is True
+        assert kwargs["samesite"] == "lax"
+
+
+def test_a_clear_instruction_matches_the_path_it_set(cookies_mod):
+    # A browser only matches a delete against a cookie with the SAME path,
+    # so a mismatch here would silently leave the credential in place.
+    assert (
+        cookies_mod.clear_session_cookie_kwargs()["path"]
+        == cookies_mod.build_session_cookie_kwargs("v", 1)["path"]
+    )
+    assert (
+        cookies_mod.clear_refresh_cookie_kwargs()["path"]
+        == cookies_mod.build_refresh_cookie_kwargs("v", 1)["path"]
+    )
+
+
+def test_session_cookie_max_age_passed_through_unchanged(cookies_mod):
+    assert cookies_mod.build_session_cookie_kwargs("v", 42)["max_age"] == 42
+    assert cookies_mod.build_session_csrf_cookie_kwargs("v", 42)["max_age"] == 42
+
+
+def test_the_two_csrf_cookies_differ_only_by_path(cookies_mod):
+    # Documented in _cookies.py's "A note on running both paths at once":
+    # same name, different Path -- which is why a project picks ONE
+    # cookie-borne credential per origin.
+    session_csrf = cookies_mod.build_session_csrf_cookie_kwargs("v", 1)
+    refresh_csrf = cookies_mod.build_csrf_cookie_kwargs("v", 1)
+    assert session_csrf["key"] == refresh_csrf["key"] == "csrf_token"
+    assert session_csrf["path"] != refresh_csrf["path"]
+    differing = {k for k in session_csrf if session_csrf[k] != refresh_csrf[k]}
+    assert differing == {"path"}
+
+
+# ---------------------------------------------------------------------------
+# Cookie-name and path constants
 # ---------------------------------------------------------------------------
 
 
 def test_cookie_name_constants(cookies_mod):
+    assert cookies_mod.SESSION_COOKIE_NAME == "session_id"
     assert cookies_mod.REFRESH_COOKIE_NAME == "refresh_token"
     assert cookies_mod.CSRF_COOKIE_NAME == "csrf_token"
+
+
+def test_cookie_path_constants(cookies_mod):
+    assert cookies_mod.SESSION_COOKIE_PATH == "/"
+    assert cookies_mod.REFRESH_COOKIE_PATH == "/auth"
 
 
 # ---------------------------------------------------------------------------

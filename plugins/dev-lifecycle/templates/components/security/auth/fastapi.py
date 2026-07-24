@@ -1,26 +1,39 @@
-"""FastAPI wiring for the auth component: the `HTTPBearer` scheme, a
-`build_get_current_principal(get_auth_service)` dependency FACTORY that
-resolves the bearer token into `_core.AccessClaims`, a `require_roles(...)`
-dependency factory for role-gated routes, the `AUTH_ERROR_HTTP`
-exception -> (status, code-string) table an app's own exception handler
-uses to render `_core.AuthError` (and this file's `InsufficientRole`) as
-its `ErrorEnvelope`, and (Stage 5d, #46) thin Starlette glue over
-`_cookies.py`'s framework-neutral cookie/CSRF transport — `set_auth_cookies`,
-`clear_auth_cookies`, `read_refresh_cookie`, `enforce_csrf` — for a project
-that authenticates the cookie-based (rather than bearer-token) way. Canon:
-references/security/secure-baseline.md ("Tokens (JWT/session) validated
-fully").
+"""FastAPI wiring for the auth component, covering BOTH authentication
+paths this component ships.
 
-Drop-in: copy this whole directory (this file, `_core.py`, `_cookies.py`)
-into app/core/security/auth/ (add an `__init__.py` re-exporting the public
-surface — see rate-limiting/fastapi.py's own header note for the identical
-pattern, and this app's `app/core/security/rate_limiting/__init__.py` for
-how that re-export is shaped). This file imports its core logic with bare
-`import _core`/`import _cookies` — flat, directory-local sibling imports,
-same as every other framework adapter in this catalog (see security-headers/
-fastapi.py's fuller rationale) — so this file, `_core.py`, `_cookies.py`,
-and the `__init__.py` a project adds must be vendored together, never this
-file alone.
+**Session path (the default for browser clients):**
+`build_get_current_session_principal(get_session_service)` — a dependency
+FACTORY that resolves the `session_id` cookie into a
+`_sessions.SessionPrincipal` — plus `set_session_cookies`,
+`clear_session_cookies`, and `read_session_cookie`.
+
+**Bearer/JWT path (native and mobile clients, service-to-service):** the
+`HTTPBearer` scheme, `build_get_current_principal(get_auth_service)`
+resolving the bearer token into `_core.AccessClaims`, and (from Stage 5d)
+the refresh-cookie glue `set_auth_cookies`/`clear_auth_cookies`/
+`read_refresh_cookie`.
+
+**Shared by both:** `require_roles(...)` — one role-gate factory that works
+against EITHER principal (see its docstring; `SessionPrincipal` is
+duck-type-compatible with `AccessClaims` on `sub`/`roles` precisely so this
+stays true), `enforce_csrf` for whichever cookie path is in use, and the
+`AUTH_ERROR_HTTP` exception -> (status, code-string) table an app's own
+exception handler uses to render `_core.AuthError` (and this file's
+`InsufficientRole`) as its `ErrorEnvelope`. Canon:
+references/security/secure-baseline.md ("Authentication & authorization"),
+references/wiring/auth-end-to-end.md.
+
+Drop-in: copy this whole directory (this file, `_core.py`, `_sessions.py`,
+`_cookies.py`) into app/core/security/auth/ (add an `__init__.py`
+re-exporting the public surface — see rate-limiting/fastapi.py's own header
+note for the identical pattern, and this app's
+`app/core/security/rate_limiting/__init__.py` for how that re-export is
+shaped). This file imports its core logic with bare `import _core`/
+`import _sessions`/`import _cookies` — flat, directory-local sibling
+imports, same as every other framework adapter in this catalog (see
+security-headers/fastapi.py's fuller rationale) — so this file, `_core.py`,
+`_sessions.py`, `_cookies.py`, and the `__init__.py` a project adds must be
+vendored together, never this file alone.
 
 Starlette/FastAPI only (`starlette`, `fastapi`) — deliberately **no
 `app.*` import anywhere in this file**, matching `_core.py`'s own "no
@@ -52,7 +65,8 @@ from typing import Any, Callable
 
 import _core
 import _cookies
-from fastapi import Depends
+import _sessions
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # `auto_error=False`: a missing/malformed `Authorization` header should
@@ -92,9 +106,72 @@ AUTH_ERROR_HTTP: dict[type[Exception], tuple[int, str]] = {
     _core.TokenReused: (401, "unauthenticated"),
     _core.EmailAlreadyExists: (409, "conflict"),
     _core.InvalidSingleUseToken: (401, "unauthenticated"),
+    _sessions.InvalidSession: (401, "unauthenticated"),
     InsufficientRole: (403, "permission_denied"),
     _cookies.CsrfValidationError: (403, "permission_denied"),
 }
+
+
+# ---------------------------------------------------------------------------
+# Session path (the default for browser clients)
+# ---------------------------------------------------------------------------
+
+
+def build_get_current_session_principal(
+    get_session_service: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Returns a FastAPI dependency that resolves the request's
+    `session_id` cookie into a `_sessions.SessionPrincipal` — **the
+    default way a browser-facing route in this catalog learns "who is
+    calling, and with which roles"** (`Depends(get_current_principal)` in
+    a project's own `app/api/deps.py`, where `get_current_principal` is
+    what this factory returned).
+
+    `get_session_service` is itself a FastAPI-dependency-shaped callable
+    (the app's own per-request `_sessions.SessionService` provider, bound
+    to that request's DB session) that returns a `SessionService`. Passed
+    in rather than imported for exactly the reason
+    `build_get_current_principal` documents below: this file has no DB
+    session and no settings, so only the app that vendors it can construct
+    one.
+
+    A missing cookie is passed through to `SessionService.resolve` as
+    `None` rather than short-circuited here — `resolve` treats a missing,
+    blank, unknown, revoked, and expired session identically (one
+    `_sessions.InvalidSession`, see its docstring), so "no session" and
+    "dead session" are indistinguishable at this layer and both render as
+    the same 401 `unauthenticated` envelope via `AUTH_ERROR_HTTP`. That
+    also keeps the rejection-reason audit event (`auth.session.rejected`)
+    emitted from ONE place inside `resolve`, rather than split between the
+    core and this adapter.
+
+    **This dependency deliberately does NOT enforce CSRF.** Resolving a
+    principal happens on safe and unsafe requests alike, and a blanket
+    check here would demand an `X-CSRF-Token` header on every `GET`. Call
+    `enforce_csrf(request)` from the unsafe-method routes themselves (or
+    from one middleware that filters on method) — see this module's
+    `enforce_csrf` docstring and `_cookies.py`'s own on why session mode
+    makes that non-optional rather than advisory.
+
+    Never returns `None`/optional — a route depending on this either gets
+    a real `SessionPrincipal` or the request never reaches the route body."""
+
+    # `request: Request` is annotated with the real Starlette type, not
+    # `Any`: FastAPI injects the request object by TYPE ANNOTATION rather
+    # than by parameter name, so an `Any`-annotated parameter here would be
+    # treated as an undeclared query parameter instead of the request.
+    async def get_current_session_principal(
+        request: Request,
+        session_service: Any = Depends(get_session_service),
+    ) -> Any:
+        return await session_service.resolve(read_session_cookie(request))
+
+    return get_current_session_principal
+
+
+# ---------------------------------------------------------------------------
+# Bearer/JWT path (native + mobile clients, service-to-service)
+# ---------------------------------------------------------------------------
 
 
 def build_get_current_principal(
@@ -104,6 +181,16 @@ def build_get_current_principal(
     token into `_core.AccessClaims` — what a route depends on to know
     "who is calling, and with which roles" (`Depends(get_current_principal)`
     in a project's own `app/api/deps.py`).
+
+    **This is the NATIVE/MOBILE and service-to-service path.** For a
+    browser client, prefer `build_get_current_session_principal` above:
+    a session is revocable on the next request, reflects role changes
+    immediately, and puts nothing readable in the browser — see
+    `_sessions.py`'s module docstring for the full comparison. This
+    bearer path remains fully supported and is the CORRECT choice where a
+    client has an OS-backed secret store (Expo SecureStore, iOS Keychain,
+    Android Keystore) and no ambient-cookie exposure, or where a caller
+    has no user session at all.
 
     `get_auth_service` is itself a FastAPI-dependency-shaped callable
     (typically `Depends`-wrapped by the returned dependency below, i.e.
@@ -141,13 +228,22 @@ def require_roles(
     *roles: str,
 ) -> Callable[..., Any]:
     """Returns a FastAPI dependency that depends on `get_current_principal`
-    (the dependency `build_get_current_principal` returned — passed in
-    rather than closed over a module-level name, since this component has
-    no fixed one: each project builds its own via `build_get_current_principal`,
-    bound to its own `get_auth_service`) and additionally enforces that the
-    resolved principal's `roles` cover every role listed in `*roles`,
-    raising `InsufficientRole` (-> 403 `permission_denied`, see
-    `AUTH_ERROR_HTTP`) otherwise. Use per-route:
+    and additionally enforces that the resolved principal's `roles` cover
+    every role listed in `*roles`, raising `InsufficientRole` (-> 403
+    `permission_denied`, see `AUTH_ERROR_HTTP`) otherwise.
+
+    **Works against EITHER authentication path, unchanged.** Pass the
+    dependency `build_get_current_session_principal` returned (session
+    mode, the browser default) or the one `build_get_current_principal`
+    returned (bearer mode) — this factory only ever reads `.roles`, and
+    `_sessions.SessionPrincipal` is deliberately duck-type-compatible with
+    `_core.AccessClaims` on exactly that attribute (see its docstring). One
+    role gate therefore covers both transports, which is what lets a
+    project serve session-authenticated web and bearer-authenticated mobile
+    from ONE set of route handlers. The principal dependency is passed in
+    rather than closed over a module-level name because this component has
+    no fixed one: each project builds its own, bound to its own service
+    provider. Use per-route:
 
         require_admin = require_roles(get_current_principal, "admin")
 
@@ -179,9 +275,54 @@ def require_roles(
 # functions exist only to map `_cookies.py`'s framework-neutral dicts and
 # plain-string reads onto Starlette's own `Response`/`Request` surface —
 # they are called by a project's own `/auth/login`, `/auth/refresh`, and
-# `/auth/logout` route handlers (a later agent's job — see this
-# component's README's "Cookie/CSRF transport" section), never by
-# anything in this file itself.
+# `/auth/logout` route handlers (see this component's README's
+# "Server-side sessions" and "Cookie/CSRF transport" sections), never by
+# anything in this file itself. The `set_session_*`/`read_session_cookie`
+# trio serves the DEFAULT session path; the `set_auth_cookies` trio below
+# them serves the JWT refresh path.
+
+
+def set_session_cookies(response: Any, *, session_value: str, csrf_value: str, max_age: int) -> None:
+    """Sets BOTH the session-id and CSRF cookies on `response` — called
+    after a successful login (or any other point a new session is issued:
+    an OAuth callback, a post-registration auto-login, a
+    `SessionService.rotate` at a privilege boundary).
+
+    `session_value` is `IssuedSession.session_id` (the RAW id, the only
+    time it is ever available — only its hash was persisted);
+    `csrf_value` comes from `_cookies.generate_csrf_token()`; `max_age`
+    should be `IssuedSession.max_age_seconds(now)`, which measures to the
+    session's ABSOLUTE deadline so the cookie survives an idle period and
+    lets the server decide when the session went stale.
+
+    **A fresh CSRF token accompanies every new session id**, never a
+    reused one: the two cookies are set and cleared together so a stale
+    CSRF cookie can never outlive the credential it was minted to guard."""
+    response.set_cookie(**_cookies.build_session_cookie_kwargs(session_value, max_age))
+    response.set_cookie(**_cookies.build_session_csrf_cookie_kwargs(csrf_value, max_age))
+
+
+def clear_session_cookies(response: Any) -> None:
+    """Clears BOTH the session-id and CSRF cookies on `response` — called
+    on logout, via `_cookies.clear_session_cookie_kwargs`/
+    `clear_session_csrf_cookie_kwargs` (each `max_age=0`, deleting the
+    cookie immediately).
+
+    Clearing cookies is the COSMETIC half of logout and must never be the
+    only half: a route handler calls `SessionService.revoke(...)` as well,
+    which kills the server-side record so the id stops authenticating even
+    for a client that ignores the delete instruction."""
+    response.set_cookie(**_cookies.clear_session_cookie_kwargs())
+    response.set_cookie(**_cookies.clear_session_csrf_cookie_kwargs())
+
+
+def read_session_cookie(request: Any) -> str | None:
+    """Reads the raw `session_id` cookie off `request.cookies` — `None` if
+    it was never set or has already been cleared. Passed straight into
+    `_sessions.SessionService.resolve`, which accepts `None` and treats it
+    identically to every other invalid-session case, so this function
+    never needs to raise on a missing cookie itself."""
+    return request.cookies.get(_cookies.SESSION_COOKIE_NAME)
 
 
 def set_auth_cookies(response: Any, *, refresh_value: str, csrf_value: str, max_age: int) -> None:
@@ -225,12 +366,29 @@ def enforce_csrf(request: Any) -> None:
     `request` (a Starlette/FastAPI `Request`) and runs
     `_cookies.verify_double_submit` against them — raises
     `_cookies.CsrfValidationError` (-> 403 `permission_denied`, see
-    `AUTH_ERROR_HTTP` above) on any double-submit failure. Called by a
-    cookie-authenticated route handler BEFORE acting on the request body —
-    never on the bearer-token path (`build_get_current_principal`/
-    `require_roles` above), which has no CSRF exposure to begin with; see
-    `_cookies.py`'s own module docstring for why the two paths are
-    treated differently."""
+    `AUTH_ERROR_HTTP` above) on any double-submit failure. Serves BOTH
+    cookie paths unchanged: it reads the cookie by NAME, and the browser
+    sends whichever `csrf_token` cookie matches the request path.
+
+    **Where to call it differs by path, and this is the important part.**
+
+    - **Session mode** — on EVERY unsafe-method request (`POST`, `PUT`,
+      `PATCH`, `DELETE`), not just `/auth/*`. The session cookie is scoped
+      `Path=/`, so every state-changing route in the application carries an
+      ambient credential and is a CSRF target. A project that enforces this
+      per-route must not forget one; routing it through a single middleware
+      that filters on `request.method` is the safer shape. See
+      `_cookies.py`'s module docstring on why `Path=/` makes this
+      non-optional.
+    - **Refresh/JWT mode** — only on the cookie-borne `/auth/refresh` and
+      `/auth/logout` routes, since the `Path=/auth` refresh cookie reaches
+      nothing else.
+
+    **Never call it on the bearer path** (`build_get_current_principal`/a
+    mobile client's requests), which has no ambient credential and
+    therefore no CSRF exposure — demanding a CSRF header there would only
+    break a client that correctly has no cookies to echo. See
+    `_cookies.py`'s own module docstring for why the paths differ."""
     _cookies.verify_double_submit(
         csrf_cookie=request.cookies.get(_cookies.CSRF_COOKIE_NAME),
         csrf_header=request.headers.get("X-CSRF-Token"),

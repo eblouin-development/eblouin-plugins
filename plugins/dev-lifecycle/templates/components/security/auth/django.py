@@ -1,26 +1,37 @@
-"""Django wiring for the auth component: `resolve_principal(request,
-auth_service)` -- an async helper resolving a request's `Authorization`
-header into `_core.AccessClaims` -- `require_roles(request, auth_service,
-*roles)` for role-gated views, the `AUTH_ERROR_HTTP` exception ->
-(status, code-string) table an app's own exception handler uses to render
-`_core.AuthError` (and this file's `InsufficientRole`) as its
-`ErrorEnvelope`, and (Stage 5d, #46) DRF-free glue over `_cookies.py`'s
-framework-neutral cookie/CSRF transport -- `set_auth_cookies`,
-`clear_auth_cookies`, `read_refresh_cookie`, `enforce_csrf` -- for a
-project that authenticates the cookie-based (rather than bearer-token)
-way. Canon: references/security/secure-baseline.md ("Tokens (JWT/session)
-validated fully").
+"""Django wiring for the auth component, covering BOTH authentication
+paths this component ships.
 
-Drop-in: copy this whole directory (this file, `_core.py`, `_cookies.py`)
-into app/core/security/auth/ (add an `__init__.py` re-exporting the public
-surface -- see rate-limiting/django.py's own header note for the identical
-pattern, and this app's `app/core/security/rate_limiting/__init__.py` for
-how that re-export is shaped). This file imports its core logic with bare
-`import _core`/`import _cookies` -- flat, directory-local sibling imports,
-same as every other framework adapter in this catalog (see security-headers/
-django.py's fuller rationale) -- so this file, `_core.py`, `_cookies.py`,
-and the `__init__.py` a project adds must be vendored together, never this
-file alone.
+**Session path (the default for browser clients):**
+`resolve_session_principal(request, session_service)` -- an async helper
+resolving the `session_id` cookie into a `_sessions.SessionPrincipal` --
+`require_session_roles(request, session_service, *roles)` for role-gated
+views, plus `set_session_cookies`, `clear_session_cookies`, and
+`read_session_cookie`.
+
+**Bearer/JWT path (native and mobile clients, service-to-service):**
+`resolve_principal(request, auth_service)` resolving a request's
+`Authorization` header into `_core.AccessClaims`, `require_roles(request,
+auth_service, *roles)`, and (from Stage 5d) the refresh-cookie glue
+`set_auth_cookies`/`clear_auth_cookies`/`read_refresh_cookie`.
+
+**Shared by both:** `enforce_csrf` for whichever cookie path is in use,
+and the `AUTH_ERROR_HTTP` exception -> (status, code-string) table an
+app's own exception handler uses to render `_core.AuthError` (and this
+file's `InsufficientRole`) as its `ErrorEnvelope`. Canon:
+references/security/secure-baseline.md ("Authentication & authorization"),
+references/wiring/auth-end-to-end.md.
+
+Drop-in: copy this whole directory (this file, `_core.py`, `_sessions.py`,
+`_cookies.py`) into app/core/security/auth/ (add an `__init__.py`
+re-exporting the public surface -- see rate-limiting/django.py's own header
+note for the identical pattern, and this app's
+`app/core/security/rate_limiting/__init__.py` for how that re-export is
+shaped). This file imports its core logic with bare `import _core`/
+`import _sessions`/`import _cookies` -- flat, directory-local sibling
+imports, same as every other framework adapter in this catalog (see
+security-headers/django.py's fuller rationale) -- so this file, `_core.py`,
+`_sessions.py`, `_cookies.py`, and the `__init__.py` a project adds must be
+vendored together, never this file alone.
 
 Django only (`django`) -- deliberately **no `core.*`/project import
 anywhere in this file**, matching `_core.py`'s own "no FastAPI/Django/
@@ -88,6 +99,7 @@ from typing import Any
 
 import _core
 import _cookies
+import _sessions
 
 
 class InsufficientRole(_core.AuthError):
@@ -121,15 +133,98 @@ AUTH_ERROR_HTTP: dict[type[Exception], tuple[int, str]] = {
     _core.TokenReused: (401, "unauthenticated"),
     _core.EmailAlreadyExists: (409, "conflict"),
     _core.InvalidSingleUseToken: (401, "unauthenticated"),
+    _sessions.InvalidSession: (401, "unauthenticated"),
     InsufficientRole: (403, "permission_denied"),
     _cookies.CsrfValidationError: (403, "permission_denied"),
 }
+
+
+# ---------------------------------------------------------------------------
+# Session path (the default for browser clients)
+# ---------------------------------------------------------------------------
+
+
+async def resolve_session_principal(request: Any, session_service: Any) -> Any:
+    """Resolves `request`'s `session_id` cookie into a
+    `_sessions.SessionPrincipal` -- **the default way a browser-facing
+    Django/DRF view in this catalog learns "who is calling, and with which
+    roles"** before running its own body.
+
+    `session_service` is a `_sessions.SessionService` (or anything
+    duck-typed the same way -- only `resolve` is called on it) the CALLER
+    constructs and passes in on every call, never imported or built here,
+    for the same reason `resolve_principal` below takes its
+    `auth_service`: no project-level settings or DB session exists at this
+    layer to build one from.
+
+    A missing cookie is passed through as `None` rather than
+    short-circuited here -- `SessionService.resolve` treats missing,
+    blank, unknown, revoked, and expired sessions identically (one
+    `_sessions.InvalidSession`, see its docstring), so "no session" and
+    "dead session" render as the same 401 `unauthenticated` envelope via
+    `AUTH_ERROR_HTTP`, and the rejection-reason audit event stays emitted
+    from one place inside `resolve`.
+
+    **Does NOT enforce CSRF** -- resolving a principal happens on safe and
+    unsafe requests alike. Call `enforce_csrf(request)` from unsafe-method
+    views (or one middleware filtering on `request.method`); see that
+    function's docstring on why session mode makes that mandatory rather
+    than advisory.
+
+    Never returns `None`/optional -- a caller either gets a real
+    `SessionPrincipal` back or this coroutine raises, the same contract
+    `resolve_principal` has on the bearer path."""
+    return await session_service.resolve(read_session_cookie(request))
+
+
+async def require_session_roles(request: Any, session_service: Any, *roles: str) -> Any:
+    """Resolves `request`'s session principal (via
+    `resolve_session_principal` above) and additionally enforces that the
+    principal's `roles` cover every role listed in `*roles`, raising
+    `InsufficientRole` (-> 403 `permission_denied`, see
+    `AUTH_ERROR_HTTP`) otherwise. Returns the resolved `SessionPrincipal`
+    on success, so a view can use its result directly:
+
+        principal = await require_session_roles(request, session_service, "admin")
+
+    Identical `set(roles) <= set(principal.roles)` AND-semantics to
+    `require_roles` below -- the two differ only in which credential they
+    resolve, never in what "sufficient role" means, so a project serving
+    session-authenticated web and bearer-authenticated mobile enforces one
+    authorization rule across both.
+
+    **Roles here are read LIVE from the user store** on every call (see
+    `_sessions.SessionService.resolve`), so revoking a role takes effect
+    on the very next request -- unlike the bearer path below, where a
+    `roles` claim baked into an access JWT stays true until that token
+    expires. Kept as a separate function from `require_roles` rather than
+    one function branching on the credential type, matching this file's
+    existing "each helper reads standalone when vendored" posture."""
+    principal = await resolve_session_principal(request, session_service)
+    required = set(roles)
+    if not required.issubset(set(principal.roles)):
+        raise InsufficientRole("This action requires a role the current principal does not have.")
+    return principal
+
+
+# ---------------------------------------------------------------------------
+# Bearer/JWT path (native + mobile clients, service-to-service)
+# ---------------------------------------------------------------------------
 
 
 async def resolve_principal(request: Any, auth_service: Any) -> Any:
     """Resolves `request`'s `Authorization` header into `_core.AccessClaims`
     -- what a Django/DRF view calls (and awaits) to know "who is calling,
     and with which roles" before running its own body.
+
+    **This is the NATIVE/MOBILE and service-to-service path.** For a
+    browser client, prefer `resolve_session_principal` above -- a session
+    is revocable on the next request, reflects role changes immediately,
+    and puts nothing readable in the browser (see `_sessions.py`'s module
+    docstring for the full comparison). This bearer path remains fully
+    supported and is the CORRECT choice where a client has an OS-backed
+    secret store and no ambient-cookie exposure, or where a caller has no
+    user session at all.
 
     `auth_service` is an `_core.AuthService` (or anything duck-typed the
     same way -- only `resolve_access` is called on it) the CALLER
@@ -206,6 +301,50 @@ async def require_roles(request: Any, auth_service: Any, *roles: str) -> Any:
 # `.COOKIES`/`.headers`/`.set_cookie(...)` surface this glue reads/calls.
 
 
+def set_session_cookies(response: Any, *, session_value: str, csrf_value: str, max_age: int) -> None:
+    """Sets BOTH the session-id and CSRF cookies on `response` -- called
+    after a successful login, or any other point a new session is issued
+    (an OAuth callback, a post-registration auto-login, a
+    `SessionService.rotate` at a privilege boundary).
+
+    `session_value` is `_sessions.IssuedSession.session_id` (the RAW id --
+    the only time it is ever available, since only its hash was
+    persisted); `csrf_value` comes from `_cookies.generate_csrf_token()`;
+    `max_age` should be `IssuedSession.max_age_seconds(now)`, which
+    measures to the session's ABSOLUTE deadline so the cookie survives an
+    idle period and lets the server decide when the session went stale.
+    Identical behavior to `fastapi.py`'s own `set_session_cookies` -- the
+    difference is purely mechanical (`response.set_cookie` is a plain
+    Django/DRF method call here, a Starlette `Response` method there)."""
+    response.set_cookie(**_cookies.build_session_cookie_kwargs(session_value, max_age))
+    response.set_cookie(**_cookies.build_session_csrf_cookie_kwargs(csrf_value, max_age))
+
+
+def clear_session_cookies(response: Any) -> None:
+    """Clears BOTH the session-id and CSRF cookies on `response` -- called
+    on logout, via `_cookies.clear_session_cookie_kwargs`/
+    `clear_session_csrf_cookie_kwargs` (each `max_age=0`, expiring the
+    cookie immediately).
+
+    Clearing cookies is the COSMETIC half of logout and must never be the
+    only half: a view calls `SessionService.revoke(...)` as well, which
+    kills the server-side record so the id stops authenticating even for a
+    client that ignores the delete instruction."""
+    response.set_cookie(**_cookies.clear_session_cookie_kwargs())
+    response.set_cookie(**_cookies.clear_session_csrf_cookie_kwargs())
+
+
+def read_session_cookie(request: Any) -> str | None:
+    """Reads the raw `session_id` cookie off `request.COOKIES` (a plain
+    dict-like mapping present on both `django.http.HttpRequest` and DRF's
+    `rest_framework.request.Request`) -- `None` if it was never set or has
+    already been cleared. Passed straight into
+    `_sessions.SessionService.resolve`, which accepts `None` and treats it
+    identically to every other invalid-session case, so this function
+    never needs to raise on a missing cookie itself."""
+    return request.COOKIES.get(_cookies.SESSION_COOKIE_NAME)
+
+
 def set_auth_cookies(response: Any, *, refresh_value: str, csrf_value: str, max_age: int) -> None:
     """Sets BOTH the refresh-token and CSRF-token cookies on `response` --
     called after a successful login or refresh, once the caller has a new
@@ -249,11 +388,32 @@ def enforce_csrf(request: Any) -> None:
     `X-CSRF-Token` header (`request.headers`) off `request` and runs
     `_cookies.verify_double_submit` against them -- raises
     `_cookies.CsrfValidationError` (-> 403 `permission_denied`, see
-    `AUTH_ERROR_HTTP` above) on any double-submit failure. Called by a
-    cookie-authenticated view BEFORE acting on the request body -- never
-    on the bearer-token path (`resolve_principal`/`require_roles` above),
-    which has no CSRF exposure to begin with; see `_cookies.py`'s own
-    module docstring for why the two paths are treated differently."""
+    `AUTH_ERROR_HTTP` above) on any double-submit failure. Serves BOTH
+    cookie paths unchanged: it reads the cookie by NAME, and the browser
+    sends whichever `csrf_token` cookie matches the request path.
+
+    **Where to call it differs by path, and this is the important part.**
+
+    - **Session mode** -- on EVERY unsafe-method request (`POST`, `PUT`,
+      `PATCH`, `DELETE`), not just `/auth/*`. The session cookie is scoped
+      `Path=/`, so every state-changing view in the application carries an
+      ambient credential and is a CSRF target. Routing this through one
+      middleware that filters on `request.method` is safer than
+      remembering it per view. (This component's own check is used rather
+      than Django's built-in `CsrfViewMiddleware` because the credential
+      here is this component's session cookie, not Django's own
+      `django.contrib.sessions` cookie -- a project using BOTH should
+      still leave Django's middleware in place for its own views; the two
+      are independent and do not conflict.)
+    - **Refresh/JWT mode** -- only on the cookie-borne `/auth/refresh` and
+      `/auth/logout` views, since the `Path=/auth` refresh cookie reaches
+      nothing else.
+
+    **Never call it on the bearer path** (`resolve_principal`/
+    `require_roles` above), which has no ambient credential and therefore
+    no CSRF exposure -- demanding a CSRF header there would only break a
+    client that correctly has no cookies to echo. See `_cookies.py`'s own
+    module docstring for why the paths differ."""
     _cookies.verify_double_submit(
         csrf_cookie=request.COOKIES.get(_cookies.CSRF_COOKIE_NAME),
         csrf_header=request.headers.get("X-CSRF-Token"),

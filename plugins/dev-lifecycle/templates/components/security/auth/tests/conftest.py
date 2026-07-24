@@ -1,24 +1,27 @@
-"""Loads this component's `_core.py`, `_cookies.py`, `fastapi.py`, and
-`django.py` under private module names without ever putting this
-directory on `sys.path` -- see security-headers/tests/conftest.py's
-docstring for the full rationale (this component mirrors the same
-load-by-file-path pattern rate-limiting/db-session/etc. use throughout
-this catalog). Load order matters: `_core` first (no sibling deps),
-then `_cookies` (imports `_core` via a bare `import _core`, resolved
-against `sys.modules["_core"]` since that's the exact name it was
-registered under below), then `fastapi`/`django` (each imports both
-`_core` and `_cookies` the same bare-sibling-import way). `fastapi.py`
+"""Loads this component's `_core.py`, `_sessions.py`, `_cookies.py`,
+`_oauth.py`, `fastapi.py`, and `django.py` under private module names
+without ever putting this directory on `sys.path` -- see
+security-headers/tests/conftest.py's docstring for the full rationale
+(this component mirrors the same load-by-file-path pattern
+rate-limiting/db-session/etc. use throughout this catalog). Load order
+matters: `_core` first (no sibling deps), then `_sessions`/`_cookies`
+(each imports `_core` via a bare `import _core`, resolved against
+`sys.modules["_core"]` since that's the exact name it was registered
+under below), then `fastapi`/`django` (each imports `_core`,
+`_cookies`, AND `_sessions` the same bare-sibling-import way -- so both
+must already be registered before either adapter loads). `fastapi.py`
 needs the real `fastapi` package installed to import (`fastapi.Depends`,
-`fastapi.security.HTTPBearer`) -- see this component's README's
-"Testing" section for the `uv run --with fastapi ...` invocation this
-requires; `django.py` needs no `django` package import at all (see that
-file's own module docstring), so loading it costs nothing extra.
+`fastapi.Request`, `fastapi.security.HTTPBearer`) -- see this component's
+README's "Testing" section for the `uv run --with fastapi ...` invocation
+this requires; `django.py` needs no `django` package import at all (see
+that file's own module docstring), so loading it costs nothing extra.
 
 Also provides the shared test fixtures every test module in this
-directory needs: in-memory fakes implementing `UserStore` and
-`RefreshTokenStore` (plain dicts, no real database), an injectable/
-advanceable `now`, a `TokenService` built against a fixed test signing
-key, and a fully wired `AuthService`."""
+directory needs: in-memory fakes implementing `UserStore`,
+`RefreshTokenStore`, and `SessionStore` (plain dicts, no real database),
+an injectable/advanceable `now`, a `TokenService` built against a fixed
+test signing key, a fully wired `AuthService`, and a fully wired
+`SessionService`."""
 
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ def _load(module_name: str, filename: str) -> ModuleType:
 
 
 core = _load("_core", "_core.py")
+sessions = _load("_sessions", "_sessions.py")
 cookies = _load("_cookies", "_cookies.py")
 oauth = _load("_oauth", "_oauth.py")
 fastapi_adapter = _load("auth_fastapi_adapter", "fastapi.py")
@@ -52,6 +56,11 @@ django_adapter = _load("auth_django_adapter", "django.py")
 @pytest.fixture(scope="session")
 def core_mod() -> ModuleType:
     return core
+
+
+@pytest.fixture(scope="session")
+def sessions_mod() -> ModuleType:
+    return sessions
 
 
 @pytest.fixture(scope="session")
@@ -219,9 +228,83 @@ class FakeRefreshTokenStore:
                 )
 
 
+class FakeSessionStore:
+    """In-memory `SessionStore` -- a dict keyed by `session_hash`,
+    mirroring `FakeRefreshTokenStore`'s own shape above. Counts `touch`
+    calls (`touch_calls`) so tests can assert `SessionService.resolve`'s
+    `touch_interval` write-rate bound actually suppresses writes rather
+    than merely producing the right `last_seen_at` by accident."""
+
+    def __init__(self) -> None:
+        self._by_hash: dict[str, "sessions.SessionRecord"] = {}
+        self.touch_calls: list[tuple[str, "datetime"]] = []
+
+    def _replace(self, record, **changes):
+        fields = {
+            "session_hash": record.session_hash,
+            "user_id": record.user_id,
+            "created_at": record.created_at,
+            "last_seen_at": record.last_seen_at,
+            "absolute_expires_at": record.absolute_expires_at,
+            "revoked": record.revoked,
+        }
+        fields.update(changes)
+        return sessions.SessionRecord(**fields)
+
+    async def add(self, record):
+        self._by_hash[record.session_hash] = record
+
+    async def get_by_hash(self, session_hash):
+        return self._by_hash.get(session_hash)
+
+    async def touch(self, session_hash, last_seen_at):
+        self.touch_calls.append((session_hash, last_seen_at))
+        existing = self._by_hash[session_hash]
+        self._by_hash[session_hash] = self._replace(existing, last_seen_at=last_seen_at)
+
+    async def revoke(self, session_hash):
+        # Silently tolerates an unknown hash -- `SessionStore.revoke`'s own
+        # documented idempotence contract, which `SessionService.revoke`
+        # (logout) relies on to never raise on a stale/forged cookie.
+        existing = self._by_hash.get(session_hash)
+        if existing is None:
+            return
+        self._by_hash[session_hash] = self._replace(existing, revoked=True)
+
+    async def revoke_all_for_user(self, user_id):
+        for session_hash, record in list(self._by_hash.items()):
+            if record.user_id == user_id:
+                self._by_hash[session_hash] = self._replace(record, revoked=True)
+
+    def all_records(self):
+        return list(self._by_hash.values())
+
+
 @pytest.fixture
 def user_store() -> FakeUserStore:
     return FakeUserStore()
+
+
+@pytest.fixture
+def session_store() -> FakeSessionStore:
+    return FakeSessionStore()
+
+
+@pytest.fixture
+def session_service(session_store: FakeSessionStore, user_store: FakeUserStore, clock: Clock):
+    """A `SessionService` with deliberately SHORT, round TTLs -- 1 hour
+    idle, 24 hours absolute, 1 minute touch interval -- so expiry tests
+    advance the injected `clock` by obvious amounts rather than by the
+    production defaults (12 hours / 7 days), which would make every
+    boundary assertion read as an arbitrary large number."""
+    return sessions.SessionService(
+        session_store,
+        user_store,
+        clock,
+        idle_ttl=timedelta(hours=1),
+        absolute_ttl=timedelta(hours=24),
+        touch_interval=timedelta(minutes=1),
+    )
 
 
 @pytest.fixture
