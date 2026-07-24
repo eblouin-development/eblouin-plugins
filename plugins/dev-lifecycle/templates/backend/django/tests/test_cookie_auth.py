@@ -173,7 +173,12 @@ def test_bearer_login_unchanged_real_refresh_token_and_no_set_cookie(
     api_client: APIClient, email_sender: _CapturingEmailSender
 ) -> None:
     _register_and_verify(api_client, email_sender)
-    response = api_client.post("/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json")
+    # Bearer mode is now opted into EXPLICITLY -- server-side sessions are
+    # the default. Everything about the bearer response itself is
+    # unchanged: real tokens in the body, no cookies.
+    response = api_client.post(
+        "/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer"
+    )
     assert response.status_code == 200, response.content
     body = response.json()
     assert body["refresh_token"] != ""
@@ -181,22 +186,29 @@ def test_bearer_login_unchanged_real_refresh_token_and_no_set_cookie(
     assert not response.cookies
 
 
-def test_login_with_a_non_cookie_x_auth_mode_value_is_still_bearer_mode(
+def test_login_with_an_unrecognized_x_auth_mode_value_falls_to_session_mode(
     api_client: APIClient, email_sender: _CapturingEmailSender
 ) -> None:
-    """Locked design: "Default (absent/other) = bearer" — an `X-Auth-Mode`
-    header present but NOT the exact string `"cookie"` must not switch
-    modes either."""
+    """An `X-Auth-Mode` header that is present but matches none of the
+    three known values falls to SESSION mode — the default, and the safer
+    direction for an unrecognized value to fall: the caller gets the
+    revocable credential rather than a long-lived token it did not
+    successfully ask for."""
     _register_and_verify(api_client, email_sender)
     response = api_client.post(
         "/auth/login",
         {"email": _EMAIL, "password": _PASSWORD},
         format="json",
-        HTTP_X_AUTH_MODE="mobile",
+        HTTP_X_AUTH_MODE="banana",
     )
     assert response.status_code == 200, response.content
-    assert response.json()["refresh_token"] != ""
-    assert not response.cookies
+    body = response.json()
+    assert body["token_type"] == "session"
+    # No token of any kind handed to the client -- the credential is the
+    # HttpOnly session cookie, which is the entire point.
+    assert body["access_token"] == ""
+    assert body["refresh_token"] == ""
+    assert "session_id" in response.cookies
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +319,9 @@ def test_bearer_refresh_without_csrf_header_still_succeeds(
     api_client: APIClient, email_sender: _CapturingEmailSender
 ) -> None:
     _register_and_verify(api_client, email_sender)
-    login = api_client.post("/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json")
+    login = api_client.post(
+        "/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer"
+    )
     refresh_token = login.json()["refresh_token"]
     assert refresh_token
 
@@ -423,7 +437,12 @@ def _seed_verified_admin(email: str, password: str) -> None:
 
 def test_admin_ping_returns_200_for_a_seeded_admin(api_client: APIClient) -> None:
     _seed_verified_admin(_ADMIN_EMAIL, _ADMIN_PASSWORD)
-    login = api_client.post("/auth/login", {"email": _ADMIN_EMAIL, "password": _ADMIN_PASSWORD}, format="json")
+    login = api_client.post(
+        "/auth/login",
+        {"email": _ADMIN_EMAIL, "password": _ADMIN_PASSWORD},
+        format="json",
+        HTTP_X_AUTH_MODE="bearer",
+    )
     assert login.status_code == 200, login.content
     token = login.json()["access_token"]
 
@@ -436,7 +455,9 @@ def test_admin_ping_returns_403_for_an_authenticated_non_admin(
     api_client: APIClient, email_sender: _CapturingEmailSender
 ) -> None:
     _register_and_verify(api_client, email_sender)
-    login = api_client.post("/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json")
+    login = api_client.post(
+        "/auth/login", {"email": _EMAIL, "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer"
+    )
     assert login.status_code == 200, login.content
     token = login.json()["access_token"]
 

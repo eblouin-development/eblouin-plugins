@@ -310,7 +310,7 @@ def test_force_verify_happy_path(api_client: APIClient) -> None:
     assert response.status_code == 200, response.content
     assert response.json()["email_verified"] is True
 
-    login = api_client.post("/auth/login", {"email": "mia@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "mia@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 200, login.content
 
 
@@ -385,7 +385,7 @@ def test_suspended_user_cannot_login(api_client: APIClient, email_sender: _Captu
     suspend = api_client.post(f"/admin/users/{registered['id']}/suspend", **headers)
     assert suspend.status_code == 200, suspend.content
 
-    login = api_client.post("/auth/login", {"email": "oscar@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "oscar@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 401, login.content
     assert login.json()["error"]["code"] == "unauthenticated"
 
@@ -396,7 +396,7 @@ def test_banned_user_cannot_login(api_client: APIClient, email_sender: _Capturin
     ban = api_client.post(f"/admin/users/{registered['id']}/ban", **headers)
     assert ban.status_code == 200, ban.content
 
-    login = api_client.post("/auth/login", {"email": "paula@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "paula@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 401, login.content
 
 
@@ -404,7 +404,7 @@ def test_active_user_can_still_login(api_client: APIClient, email_sender: _Captu
     """Control case for the two tests above."""
     _register_and_verify(api_client, email_sender, email="quinn@example.com", password=_PASSWORD)
 
-    login = api_client.post("/auth/login", {"email": "quinn@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "quinn@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 200, login.content
 
 
@@ -412,7 +412,7 @@ def test_ban_revokes_existing_refresh_tokens(api_client: APIClient, email_sender
     """Same proof as `backend/fastapi`'s identically-named test -- see that
     module's own docstring."""
     registered = _register_and_verify(api_client, email_sender, email="rosa@example.com", password=_PASSWORD)
-    login = api_client.post("/auth/login", {"email": "rosa@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "rosa@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 200, login.content
     refresh_token = login.json()["refresh_token"]
 
@@ -428,7 +428,7 @@ def test_suspend_revokes_existing_refresh_tokens(
     api_client: APIClient, email_sender: _CapturingEmailSender
 ) -> None:
     registered = _register_and_verify(api_client, email_sender, email="sam@example.com", password=_PASSWORD)
-    login = api_client.post("/auth/login", {"email": "sam@example.com", "password": _PASSWORD}, format="json")
+    login = api_client.post("/auth/login", {"email": "sam@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert login.status_code == 200, login.content
     refresh_token = login.json()["refresh_token"]
 

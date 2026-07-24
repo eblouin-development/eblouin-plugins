@@ -131,9 +131,18 @@ class LoginRequestSerializer(serializers.Serializer):
 
 
 class RefreshRequestSerializer(serializers.Serializer):
-    """Matches `openapi.json`'s `RefreshRequest`. See `LoginRequestSerializer`."""
+    """Matches `openapi.json`'s `RefreshRequest`. See `LoginRequestSerializer`.
 
-    refresh_token = serializers.CharField(min_length=1)
+    **`refresh_token` is optional, defaulting to `""`** -- mirroring
+    backend/fastapi's own `RefreshRequest`, whose docstring carries the
+    full rationale: a session client (the default transport) holds no
+    refresh token and must not be 422'd for honestly omitting a field that
+    means nothing on its transport. `required=False` + `allow_blank=True` +
+    `default=""` is the DRF spelling of Pydantic's `refresh_token: str =
+    ""`, and produces the byte-identical wire schema
+    `tests/test_schema_conformance.py` holds the two blocks to."""
+
+    refresh_token = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class VerifyEmailRequestSerializer(serializers.Serializer):

@@ -134,7 +134,7 @@ def _register(client: APIClient, email: str = "alice@example.com", password: str
 
 
 def _login(client: APIClient, email: str = "alice@example.com", password: str = "correct horse battery staple") -> dict:
-    response = client.post("/auth/login", {"email": email, "password": password}, format="json")
+    response = client.post("/auth/login", {"email": email, "password": password}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert response.status_code == 200, response.content
     return response.json()
 
@@ -283,7 +283,7 @@ def test_reregistering_a_soft_deleted_email_returns_409_not_500(api_client: APIC
 
 
 def test_login_with_unknown_email_returns_401_unauthenticated_envelope(api_client: APIClient) -> None:
-    response = api_client.post("/auth/login", {"email": "nobody@example.com", "password": "whatever"}, format="json")
+    response = api_client.post("/auth/login", {"email": "nobody@example.com", "password": "whatever"}, format="json", HTTP_X_AUTH_MODE="bearer")
     assert response.status_code == 401
     body = response.json()
     assert body["error"]["code"] == "unauthenticated"
@@ -294,7 +294,7 @@ def test_login_with_wrong_password_returns_401_unauthenticated_envelope(
 ) -> None:
     _register_and_verify(api_client, email_sender)
     response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "wrong password"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "wrong password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert response.status_code == 401
     body = response.json()
@@ -399,7 +399,7 @@ def test_soft_deleted_user_cannot_login_or_refresh(
     _soft_delete_user_by_email("alice@example.com")
 
     login_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert login_response.status_code == 401
     assert login_response.json()["error"]["code"] == "unauthenticated"
@@ -547,14 +547,14 @@ def test_login_before_verification_returns_401_indistinguishable_from_bad_passwo
     _register(api_client)  # deliberately NOT verified
 
     unverified_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert unverified_response.status_code == 401
     unverified_body = unverified_response.json()
     assert unverified_body["error"]["code"] == "unauthenticated"
 
     wrong_password_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "not the right password"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "not the right password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert wrong_password_response.status_code == 401
     wrong_password_body = wrong_password_response.json()
@@ -630,7 +630,7 @@ def test_reset_password_happy_path_revokes_old_sessions_and_logs_in_with_new_pas
 
     # Old password no longer works.
     old_password_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert old_password_response.status_code == 401
     assert old_password_response.json()["error"]["code"] == "unauthenticated"
@@ -641,7 +641,7 @@ def test_reset_password_happy_path_revokes_old_sessions_and_logs_in_with_new_pas
     # test_reset_password_recovers_a_never_verified_account below for the
     # case where it wasn't).
     new_password_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "a brand new password"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "a brand new password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert new_password_response.status_code == 200
 
@@ -750,7 +750,7 @@ def test_reset_password_recovers_a_never_verified_account(
     # Deliberately no _verify(api_client, email_sender) call here.
 
     blocked_response = api_client.post(
-        "/auth/login", {"email": "carol@example.com", "password": "an original password"}, format="json"
+        "/auth/login", {"email": "carol@example.com", "password": "an original password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert blocked_response.status_code == 401
     assert blocked_response.json()["error"]["code"] == "unauthenticated"
@@ -769,7 +769,7 @@ def test_reset_password_recovers_a_never_verified_account(
     assert reset_response.status_code == 204
 
     recovered_response = api_client.post(
-        "/auth/login", {"email": "carol@example.com", "password": "a freshly reset password"}, format="json"
+        "/auth/login", {"email": "carol@example.com", "password": "a freshly reset password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert recovered_response.status_code == 200
     assert "access_token" in recovered_response.json()
@@ -885,12 +885,12 @@ def test_lockout_after_max_failures_locks_out_even_the_correct_password(
 
     for _ in range(5):
         wrong = api_client.post(
-            "/auth/login", {"email": "alice@example.com", "password": "definitely wrong"}, format="json"
+            "/auth/login", {"email": "alice@example.com", "password": "definitely wrong"}, format="json", HTTP_X_AUTH_MODE="bearer"
         )
         assert wrong.status_code == 401
 
     locked_response = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert locked_response.status_code == 401
     assert locked_response.json()["error"]["code"] == "unauthenticated"
@@ -911,14 +911,14 @@ def test_reset_password_lifts_lockout_and_new_password_logs_in_immediately(
 
     for _ in range(5):
         wrong = api_client.post(
-            "/auth/login", {"email": "alice@example.com", "password": "definitely wrong"}, format="json"
+            "/auth/login", {"email": "alice@example.com", "password": "definitely wrong"}, format="json", HTTP_X_AUTH_MODE="bearer"
         )
         assert wrong.status_code == 401
 
     # Confirm the account is actually locked -- the correct OLD password
     # still fails while locked.
     still_locked = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "correct horse battery staple"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert still_locked.status_code == 401
 
@@ -938,7 +938,7 @@ def test_reset_password_lifts_lockout_and_new_password_logs_in_immediately(
     # The lock is lifted -- the new password logs in IMMEDIATELY, with no
     # remaining lockout cooldown.
     new_login = api_client.post(
-        "/auth/login", {"email": "alice@example.com", "password": "a freshly reset password"}, format="json"
+        "/auth/login", {"email": "alice@example.com", "password": "a freshly reset password"}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert new_login.status_code == 200
 

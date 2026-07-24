@@ -48,9 +48,28 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
+    """`POST /auth/refresh`'s and `POST /auth/logout`'s request body.
+
+    **`refresh_token` is optional, defaulting to `""`.** It was required
+    (`min_length=1`) when every client of these routes held a refresh
+    token; a session client holds none, and would otherwise have to
+    fabricate a value to satisfy a field that means nothing on its
+    transport — or be 422'd for honestly omitting it. Both handlers read
+    the session cookie before they look at this field, so a session-mode
+    request never reaches it at all.
+
+    Dropping `min_length=1` costs nothing on the JWT path: an empty
+    `refresh_token` presented to `/auth/refresh` raises `InvalidToken` →
+    401, which is the correct answer for an invalid token and is
+    deliberately indistinguishable from every other invalid-token case
+    (see `_core.InvalidToken`'s docstring). Previously it produced a 422
+    instead — a *different* response shape for one specific kind of bad
+    token, which was itself a small information leak. `/auth/logout` is
+    idempotent and 204s either way."""
+
     model_config = ConfigDict(extra="forbid")
 
-    refresh_token: str = Field(min_length=1)
+    refresh_token: str = ""
 
 
 class TokenResponse(BaseModel):

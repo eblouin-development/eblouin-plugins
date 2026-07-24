@@ -165,6 +165,16 @@ MIDDLEWARE = [
     "core.security.security_headers.django.SecurityHeadersMiddleware",  # note 2
     "core.security.audit_logging.middleware.RequestIDMiddleware",  # note 3
     "core.security.rate_limiting.django.RateLimitMiddleware",  # note 4
+    # Session-mode CSRF. Placed INSIDE rate limiting (so a forged
+    # cross-site request cannot burn a victim's token bucket on its way to
+    # being rejected 403) and INSIDE request-id binding (so a CSRF
+    # rejection still carries a traceable x-request-id and lands in the
+    # audit log correlatable). This is the enforcement point for the
+    # obligation session mode's Path=/ cookie creates: EVERY unsafe-method
+    # view is a CSRF target, not just /auth/*. See that module's own
+    # docstring for why it is middleware rather than a per-view call, and
+    # why it does not replace Django's own CsrfViewMiddleware.
+    "core.security.auth.csrf_middleware.SessionCsrfMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
@@ -625,5 +635,37 @@ EMAIL_FROM: str = os.environ.get("EMAIL_FROM", "no-reply@example.com")
 # core.security.auth._core.AccountService's own docstring on the
 # '#token=...' fragment placement. ------------------------------------
 FRONTEND_BASE_URL: str = os.environ.get("FRONTEND_BASE_URL", "http://localhost:5173")
+# --- Server-side sessions: the DEFAULT browser authentication path.
+# `core/security/auth/stores.py:build_session_service()` reads all three.
+# None of them is a secret -- a session id is opaque and unguessable rather
+# than signed, so unlike JWT_SIGNING_KEY there is nothing here to load from
+# a secret store and nothing to fail closed on. See
+# core/security/auth/_sessions.py's module docstring for why this path is
+# preferred over JWT for browser clients, and this block's README
+# "Sessions" section for the wiring. Ordinary os.environ.get() reads,
+# matching JWT_ISSUER/AUTH_LOCKOUT_* above. ------------------------------
+#
+# SESSION_IDLE_TTL_SECONDS (12h): the SLIDING deadline, measured against a
+# session's last_seen_at. A session unused for this long stops
+# authenticating -- what makes an abandoned session on a shared or stolen
+# machine expire without the user doing anything. Shorten it for a
+# higher-sensitivity app (a banking or admin console might use 15-30
+# minutes).
+SESSION_IDLE_TTL_SECONDS: int = int(os.environ.get("SESSION_IDLE_TTL_SECONDS", "43200"))
+# SESSION_ABSOLUTE_TTL_SECONDS (7d): the HARD ceiling, measured against
+# created_at and unaffected by activity. Without it, a session an attacker
+# keeps warm with a periodic request would live forever -- sliding expiry
+# alone rewards precisely the party actively using a stolen cookie. A
+# session must be inside BOTH deadlines to authenticate.
+SESSION_ABSOLUTE_TTL_SECONDS: int = int(os.environ.get("SESSION_ABSOLUTE_TTL_SECONDS", "604800"))
+# SESSION_TOUCH_INTERVAL_SECONDS (60s): how stale last_seen_at must be
+# before a live request writes it back -- the knob that keeps every
+# authenticated GET from becoming a database write, the usual way
+# server-side sessions turn into a write-throughput problem. It shortens
+# the EFFECTIVE idle window by at most this much, so keep it orders of
+# magnitude below SESSION_IDLE_TTL_SECONDS; it can only ever expire a
+# session slightly early, never keep a stale one alive.
+SESSION_TOUCH_INTERVAL_SECONDS: int = int(os.environ.get("SESSION_TOUCH_INTERVAL_SECONDS", "60"))
+
 AUTH_VERIFY_TTL_SECONDS: int = int(os.environ.get("AUTH_VERIFY_TTL_SECONDS", "86400"))
 AUTH_RESET_TTL_SECONDS: int = int(os.environ.get("AUTH_RESET_TTL_SECONDS", "3600"))

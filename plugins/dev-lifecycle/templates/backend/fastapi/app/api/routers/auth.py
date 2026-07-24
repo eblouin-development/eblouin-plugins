@@ -96,8 +96,7 @@ from app.core.security.auth import (
     set_auth_cookies,
     set_session_cookies,
 )
-from app.core.security.auth.stores import utc_now
-from app.core.security.auth.stores import AuditAuthEventSink, SqlAlchemyUserStore
+from app.core.security.auth.stores import AuditAuthEventSink, SqlAlchemyUserStore, utc_now
 from app.schemas.auth import (
     LoginRequest,
     PrincipalOut,
@@ -371,7 +370,7 @@ async def refresh(
 async def logout(
     request: Request,
     response: Response,
-    payload: RefreshRequest | None = None,
+    payload: RefreshRequest = RefreshRequest(),
     auth_service: AuthService = Depends(get_auth_service),
     session_service: SessionService = Depends(get_session_service),
 ) -> None:
@@ -403,14 +402,11 @@ async def logout(
     once") has its session ended, which is the credential that would
     otherwise still authenticate every route.
 
-    **The request BODY is optional** (`RefreshRequest | None`), because a
-    session client genuinely has no refresh token to send — requiring one
-    would force it to invent a value to satisfy `RefreshRequest`'s
-    `min_length=1`, and a 422 on logout for a client with nothing to put
-    in the body would be an absurd contract. The body is read only on the
-    bearer path, where it is the credential; a bearer request that omits it
-    still 204s, since logout is idempotent and there is nothing to
-    revoke."""
+    **`RefreshRequest.refresh_token` is optional** (defaulting to `""`),
+    because a session client genuinely has no refresh token to send — see
+    that schema's own docstring. The field is read only on the bearer
+    path, where it is the credential; a bearer request that omits it still
+    204s, since logout is idempotent and there is nothing to revoke."""
     session_id = read_session_cookie(request)
     if session_id is not None:
         enforce_csrf(request)
@@ -423,8 +419,7 @@ async def logout(
         await auth_service.logout(cookie_refresh_token)
         clear_auth_cookies(response)
         return None
-    if payload is not None:
-        await auth_service.logout(payload.refresh_token)
+    await auth_service.logout(payload.refresh_token)
     return None
 
 

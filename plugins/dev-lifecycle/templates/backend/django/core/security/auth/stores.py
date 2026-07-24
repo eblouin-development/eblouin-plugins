@@ -59,7 +59,7 @@ from django.conf import settings
 from django.core import mail as django_mail
 from django.db import IntegrityError
 
-from core.models import LoginAttempt, RefreshToken, SingleUseToken, User
+from core.models import LoginAttempt, RefreshToken, Session, SingleUseToken, User
 from core.security.auth import (
     AccountService,
     AttemptRecord,
@@ -70,6 +70,8 @@ from core.security.auth import (
     LockoutPolicy,
     PasswordService,
     RefreshRecord,
+    SessionRecord,
+    SessionService,
     SingleUseTokenRecord,
     SingleUseTokenService,
     TokenService,
@@ -109,6 +111,24 @@ def _refresh_to_record(row: RefreshToken) -> RefreshRecord:
         issued_at=row.issued_at,
         expires_at=row.expires_at,
         used_at=row.used_at,
+        revoked=row.revoked,
+    )
+
+
+def _session_to_record(row: Session) -> SessionRecord:
+    """Maps a `Session` ORM row onto the vendored component's frozen
+    `SessionRecord`. Django returns timezone-aware datetimes whenever
+    `USE_TZ = True` (this block's setting), so no `_as_utc`-style
+    normalization is needed here -- unlike backend/fastapi's SQLAlchemy
+    equivalent, which must coerce because a driver can hand back a naive
+    value that would then raise `TypeError` when compared against
+    `utc_now()` on this exact hot path."""
+    return SessionRecord(
+        session_hash=row.session_hash,
+        user_id=str(row.user_id),
+        created_at=row.created_at,
+        last_seen_at=row.last_seen_at,
+        absolute_expires_at=row.absolute_expires_at,
         revoked=row.revoked,
     )
 
@@ -392,6 +412,76 @@ class DjangoRefreshTokenStore:
         `.aupdate()`-call, no-`commit()`-needed durability posture as
         `mark_used`/`revoke_family` above."""
         await RefreshToken.objects.filter(user_id=uuid.UUID(user_id)).aupdate(revoked=True)
+
+
+class DjangoSessionStore:
+    """Implements `_sessions.SessionStore` against `core.models.Session`
+    via Django's async ORM -- the store behind this block's DEFAULT
+    browser authentication path.
+
+    Same "durability = Django's own AUTOCOMMIT, not an explicit commit()"
+    posture `DjangoRefreshTokenStore` above documents at length, and it
+    matters at least as much here: `SessionService.revoke` is what a
+    logout endpoint's entire security promise rests on, and a revocation
+    that is not durable when the response goes out is a logout that did
+    not happen. Every write below is a single autocommitted statement
+    (`.acreate()`, `.filter(...).aupdate()`), durable the instant it
+    returns, PROVIDED nothing wraps it in `transaction.atomic()` and
+    `ATOMIC_REQUESTS` stays unset -- this block's locked posture.
+
+    `touch` is the one write on the HOT path (potentially every
+    authenticated request), which is exactly why `SessionService`
+    rate-limits it behind `touch_interval` rather than calling it on every
+    resolve. This store does no rate-limiting of its own; it writes
+    whenever it is asked to."""
+
+    async def add(self, record: SessionRecord) -> None:
+        await Session.objects.acreate(
+            session_hash=record.session_hash,
+            user_id=uuid.UUID(record.user_id),
+            # `created_at` is written EXPLICITLY from the record rather
+            # than via `auto_now_add`: it must come from the SAME injected
+            # clock `SessionService` measured `absolute_expires_at`
+            # against, or the row's creation time and its deadline would be
+            # computed from two different "now"s.
+            created_at=record.created_at,
+            last_seen_at=record.last_seen_at,
+            absolute_expires_at=record.absolute_expires_at,
+            revoked=record.revoked,
+        )
+
+    async def get_by_hash(self, session_hash: str) -> SessionRecord | None:
+        row = await Session.objects.filter(session_hash=session_hash).afirst()
+        return _session_to_record(row) if row is not None else None
+
+    async def touch(self, session_hash: str, last_seen_at: datetime) -> None:
+        # A queryset matching zero rows updates zero rows rather than
+        # raising -- the same "best-effort write" posture
+        # `DjangoRefreshTokenStore.mark_used` documents, and especially
+        # right here: failing a live, already-authenticated request because
+        # a bookkeeping timestamp could not be written would turn a
+        # cosmetic problem into an outage.
+        await Session.objects.filter(session_hash=session_hash).aupdate(last_seen_at=last_seen_at)
+
+    async def revoke(self, session_hash: str) -> None:
+        """Marks ONE session revoked. An unknown hash updates zero rows and
+        returns normally -- `SessionStore.revoke`'s documented idempotence
+        contract, which `SessionService.revoke` (logout) relies on so a
+        stale or forged cookie never errors, and so this endpoint never
+        becomes an oracle distinguishing real session ids from invented
+        ones."""
+        await Session.objects.filter(session_hash=session_hash).aupdate(revoked=True)
+
+    async def revoke_all_for_user(self, user_id: str) -> None:
+        """Revokes EVERY session belonging to `user_id` -- every device,
+        everywhere, at once. Called on a password reset (alongside
+        `DjangoRefreshTokenStore.revoke_all_for_user`, so BOTH transports
+        die on one reset), on a detected compromise, and on an account
+        deactivation. Effective on the next request against every affected
+        session -- the guarantee the JWT path can only approximate. One
+        indexed `.aupdate()` (see migration 0007's index on
+        `sessions.user_id`), not a scan."""
+        await Session.objects.filter(user_id=uuid.UUID(user_id)).aupdate(revoked=True)
 
 
 class DjangoSingleUseTokenStore:
@@ -996,6 +1086,38 @@ def build_lockout_policy() -> LockoutPolicy | None:
     )
 
 
+def build_session_service() -> SessionService:
+    """Builds a fresh `SessionService` — the provider behind this block's
+    DEFAULT browser authentication path. Same composition shape (and the
+    same no-argument, `django.conf.settings`-reading posture) as
+    `build_auth_service()`/`build_account_service()` above: stateless
+    stores, and `utc_now` as the single shared clock every other service in
+    this block's auth composition also uses, so a session's deadlines and a
+    token's expiry are measured against the same "now".
+
+    Takes `DjangoUserStore` as well as `DjangoSessionStore` because
+    `SessionService.resolve` reads the user's CURRENT roles on every
+    request rather than trusting a snapshot — that second read is what
+    makes a role grant or revocation take effect immediately, and it is the
+    deliberate cost of this path over a JWT's baked-in `roles` claim (see
+    `_sessions.py`'s module docstring).
+
+    **Needs no signing key**, unlike `get_token_service()` above — a
+    session id is opaque and unguessable rather than signed, so there is
+    nothing to configure wrong and no `AuthNotConfiguredError` equivalent
+    to fail closed on. That is one fewer secret to manage in every
+    environment for a project serving only browser clients."""
+    return SessionService(
+        DjangoSessionStore(),
+        DjangoUserStore(),
+        utc_now,
+        idle_ttl=timedelta(seconds=settings.SESSION_IDLE_TTL_SECONDS),
+        absolute_ttl=timedelta(seconds=settings.SESSION_ABSOLUTE_TTL_SECONDS),
+        touch_interval=timedelta(seconds=settings.SESSION_TOUCH_INTERVAL_SECONDS),
+        events=AuditAuthEventSink(),
+    )
+
+
 def build_account_service(*, email: EmailSender | None = None) -> AccountService:
     """Builds a fresh `AccountService`, the SAME composition shape
     `build_auth_service()` above uses for `AuthService` — a fresh
@@ -1037,6 +1159,12 @@ def build_account_service(*, email: EmailSender | None = None) -> AccountService
         now=utc_now,
         events=AuditAuthEventSink(),
         lockout=build_lockout_policy(),
+        # Both revocation seams are wired, deliberately: reset_password
+        # already revoked every refresh-token family, and this makes it
+        # revoke every server-side session too. Wiring only one would
+        # leave a reset account HALF-revoked -- an attacker's session
+        # cookie would keep authenticating despite every JWT dying.
+        sessions=build_session_service(),
         frontend_base_url=settings.FRONTEND_BASE_URL,
         verify_ttl=timedelta(seconds=settings.AUTH_VERIFY_TTL_SECONDS),
         reset_ttl=timedelta(seconds=settings.AUTH_RESET_TTL_SECONDS),

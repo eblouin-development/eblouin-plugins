@@ -101,6 +101,7 @@ def test_register_delivers_real_verification_email_through_real_django_email_sen
         "/auth/login",
         {"email": "dana@example.com", "password": "correct horse battery staple"},
         format="json",
+        HTTP_X_AUTH_MODE="bearer",
     )
     assert login_response.status_code == 200
     assert "access_token" in login_response.json()
@@ -150,5 +151,6 @@ def test_request_password_reset_delivers_real_email_through_real_django_email_se
         "/auth/login",
         {"email": "erin@example.com", "password": "a brand new password"},
         format="json",
+        HTTP_X_AUTH_MODE="bearer",
     )
     assert login_response.status_code == 200

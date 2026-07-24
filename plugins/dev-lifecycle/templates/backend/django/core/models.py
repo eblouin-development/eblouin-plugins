@@ -342,6 +342,72 @@ class RefreshToken(models.Model):
         return f"RefreshToken(jti={self.jti})"
 
 
+class Session(models.Model):
+    """One row per live server-side session -- the `Session` the vendored
+    auth component's `SessionStore` protocol
+    (`core/security/auth/_sessions.py`) is implemented against (see
+    `core/security/auth/stores.py`'s `DjangoSessionStore`), and **this
+    block's DEFAULT browser credential**.
+
+    Persisted exactly as `_sessions.SessionRecord` describes:
+    `session_hash` (never the raw session id -- see `_core.hash_token`'s
+    own docstring on why only a hash is stored, and
+    `_sessions.generate_session_id`'s on why the id itself is opaque)
+    is the lookup key; `last_seen_at` carries the sliding idle deadline and
+    `absolute_expires_at` the hard ceiling, both checked on every
+    authenticated request; `revoked` is what makes logout, a password
+    reset, and an administrative ban take effect on the NEXT request rather
+    than after a token TTL elapses.
+
+    **No roles column, deliberately** -- `SessionService.resolve` reads the
+    user's current roles from `UserStore` on every request, so a role
+    change lands immediately. Denormalizing roles here would reintroduce
+    exactly the staleness window sessions exist to close, over a session's
+    much longer lifetime than a JWT's own short access TTL.
+
+    Column-for-column match to `backend/fastapi`'s `app/models/session.py`
+    and `alembic/versions/0007_create_sessions_table.py`'s `sessions`
+    table, with the SAME two intentional parity nuances `RefreshToken`
+    above documents at length:
+
+    1. **`user` uses `on_delete=models.PROTECT`** (an ORM-level refusal)
+       vs. Alembic 0007's DB-level FK left at its RESTRICT default -- both
+       refuse to delete a `User` that still has `Session` rows, for the
+       same "don't silently lose a security-relevant record of past
+       sessions" reason.
+    2. **No `updated_at` column.** This block's stores write via
+       queryset-level `.aupdate()`, which bypasses Django's `auto_now`
+       field machinery entirely, so an `updated_at` here would go stale on
+       every write rather than reflect reality -- leaving it out is more
+       honest than shipping a timestamp that lies. `created_at` IS kept
+       (unlike `RefreshToken`, which has neither): `SessionService` needs
+       it to measure `absolute_ttl` against, and it is written explicitly
+       by `DjangoSessionStore.add` from the service's own injected clock
+       rather than by `auto_now_add`, so it never drifts from the deadline
+       computed alongside it."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # UNIQUE -- the lookup key `SessionStore.get_by_hash` queries by, on
+    # EVERY authenticated request. The hottest index in this schema; a
+    # unique-index lookup is what keeps the read cost session auth trades
+    # statelessness for cheap.
+    session_hash = models.CharField(max_length=64, unique=True)
+    # PROTECT, not CASCADE -- see this class's own docstring, nuance 1.
+    # Indexed because `revoke_all_for_user` ("sign out everywhere", run on
+    # every password reset) filters on it.
+    user = models.ForeignKey(User, on_delete=models.PROTECT, db_index=True)
+    created_at = models.DateTimeField()
+    last_seen_at = models.DateTimeField()
+    absolute_expires_at = models.DateTimeField()
+    revoked = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "sessions"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"Session(user_id={self.user_id}, revoked={self.revoked})"
+
+
 # ---------------------------------------------------------------------------
 # Stage 5c (#45): account-lifecycle tables -- the SingleUseToken/LoginAttempt
 # the vendored auth component's SingleUseTokenStore/LockoutStore protocols

@@ -58,10 +58,15 @@ from core.security.auth import (
     clear_auth_cookies,
     enforce_csrf,
     generate_csrf_token,
+    clear_session_cookies,
     read_refresh_cookie,
+    read_session_cookie,
     require_roles,
+    require_roles_either,
     resolve_principal,
+    resolve_principal_either,
     set_auth_cookies,
+    set_session_cookies,
 )
 from core.security.auth.permissions import has_role
 from core.security.auth.stores import (
@@ -71,6 +76,7 @@ from core.security.auth.stores import (
     build_account_service,
     build_auth_service,
     build_lockout_policy,
+    build_session_service,
     get_password_service,
     get_token_service,
     utc_now,
@@ -606,10 +612,17 @@ class LoginView(APIView):
         serializer = LoginRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         auth_service = _build_login_auth_service()
-        pair = async_to_sync(auth_service.login)(
-            serializer.validated_data["email"], serializer.validated_data["password"]
-        )
-        if request.headers.get("X-Auth-Mode") == "cookie":
+        email = serializer.validated_data["email"]
+        password = serializer.validated_data["password"]
+        mode = request.headers.get("X-Auth-Mode")
+        if mode == "bearer":
+            pair = async_to_sync(auth_service.login)(email, password)
+            tokens = TokenResponseSerializer(
+                {"access_token": pair.access, "refresh_token": pair.refresh}
+            )
+            return Response(tokens.data)
+        if mode == "cookie":
+            pair = async_to_sync(auth_service.login)(email, password)
             tokens = TokenResponseSerializer({"access_token": pair.access, "refresh_token": ""})
             response = Response(tokens.data)
             set_auth_cookies(
@@ -619,8 +632,25 @@ class LoginView(APIView):
                 max_age=settings.JWT_REFRESH_TTL_SECONDS,
             )
             return response
-        tokens = TokenResponseSerializer({"access_token": pair.access, "refresh_token": pair.refresh})
-        return Response(tokens.data)
+        # DEFAULT: server-side session. Calls `authenticate` rather than
+        # `login` deliberately -- `login` would additionally mint and
+        # persist a RefreshRecord for a refresh token no client will ever
+        # hold, starting a token family logout would never revoke. See that
+        # method's own docstring in `_core.py`.
+        user = async_to_sync(auth_service.authenticate)(email, password)
+        session_service = build_session_service()
+        issued = async_to_sync(session_service.create)(user)
+        tokens = TokenResponseSerializer(
+            {"access_token": "", "refresh_token": "", "token_type": "session"}
+        )
+        response = Response(tokens.data)
+        set_session_cookies(
+            response,
+            session_value=issued.session_id,
+            csrf_value=generate_csrf_token(),
+            max_age=issued.max_age_seconds(utc_now()),
+        )
+        return response
 
 
 class RefreshView(APIView):
@@ -734,8 +764,17 @@ class LogoutView(APIView):
         responses={204: None, 422: ErrorEnvelopeSerializer},
     )
     def post(self, request):
-        serializer = RefreshRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        # SESSION path first -- the default credential. Checked before the
+        # body is even validated, because a session client legitimately has
+        # no `refresh_token` to send and must not be 422'd for omitting a
+        # field that means nothing on its transport.
+        session_id = read_session_cookie(request)
+        if session_id is not None:
+            enforce_csrf(request)
+            async_to_sync(build_session_service().revoke)(session_id)
+            response = Response(status=status.HTTP_204_NO_CONTENT)
+            clear_session_cookies(response)
+            return response
         auth_service = build_auth_service()
         cookie_refresh_token = read_refresh_cookie(request)
         if cookie_refresh_token is not None:
@@ -744,6 +783,8 @@ class LogoutView(APIView):
             response = Response(status=status.HTTP_204_NO_CONTENT)
             clear_auth_cookies(response)
             return response
+        serializer = RefreshRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         async_to_sync(auth_service.logout)(serializer.validated_data["refresh_token"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -802,7 +843,7 @@ class MeView(APIView):
     )
     def get(self, request):
         auth_service = build_auth_service()
-        claims = async_to_sync(resolve_principal)(request, auth_service)
+        claims = async_to_sync(resolve_principal_either)(request, build_session_service(), auth_service)
         user = async_to_sync(DjangoUserStore().get_by_id)(claims.sub)
         if user is None:
             raise InvalidToken("This token no longer maps to an active user.")
@@ -989,7 +1030,7 @@ class AdminUserListView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         return super().get(request, *args, **kwargs)
 
@@ -1029,7 +1070,7 @@ class AdminUserDetailView(APIView):
 
     def get(self, request, user_id):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         return Response(AdminUserOutSerializer(user).data)
@@ -1040,7 +1081,7 @@ class AdminUserDetailView(APIView):
         posture for `Item`). Self-protection: the acting admin cannot
         delete their own account (409)."""
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         _ensure_not_self(claims, user, action="delete")
@@ -1079,7 +1120,7 @@ class AdminUserSuspendView(APIView):
     )
     def post(self, request, user_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         _ensure_not_self(claims, user, action="suspend")
@@ -1121,7 +1162,7 @@ class AdminUserBanView(APIView):
     )
     def post(self, request, user_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         _ensure_not_self(claims, user, action="ban")
@@ -1160,7 +1201,7 @@ class AdminUserReinstateView(APIView):
     )
     def post(self, request, user_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         if user.status not in ("suspended", "banned"):
@@ -1202,7 +1243,7 @@ class AdminUserRolesView(APIView):
     )
     def put(self, request, user_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         serializer = AdminRolesInSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1251,7 +1292,7 @@ class AdminUserForceVerifyView(APIView):
     )
     def post(self, request, user_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         user = _get_admin_user(user_id)
         if not user.email_verified:
@@ -1390,7 +1431,7 @@ class AdminBlogPostListCreateView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         return super().get(request, *args, **kwargs)
 
@@ -1411,7 +1452,7 @@ class AdminBlogPostListCreateView(generics.ListAPIView):
         `app/api/routers/blog.py`'s `create_admin_blog_post` docstring for
         the full rationale this mirrors line-for-line."""
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
 
         serializer = BlogPostCreateSerializer(data=request.data)
@@ -1489,7 +1530,7 @@ class AdminBlogPostDetailView(APIView):
 
     def get(self, request, post_id):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         post = _get_admin_blog_post(post_id)
         return Response(BlogPostOutSerializer(post).data)
@@ -1503,7 +1544,7 @@ class AdminBlogPostDetailView(APIView):
         wants changed, to a genuinely non-null value -- see that
         serializer's own docstring."""
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         post = _get_admin_blog_post(post_id)
 
@@ -1534,7 +1575,7 @@ class AdminBlogPostDetailView(APIView):
         `DELETE`, same posture `ItemViewSet.perform_destroy`/
         `AdminUserDetailView.delete` already document."""
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         post = _get_admin_blog_post(post_id)
         post.mark_deleted()
@@ -1570,7 +1611,7 @@ class AdminBlogPostPublishView(APIView):
     )
     def post(self, request, post_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         post = _get_admin_blog_post(post_id)
         if post.status != "draft":
@@ -1611,7 +1652,7 @@ class AdminBlogPostUnpublishView(APIView):
     )
     def post(self, request, post_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         post = _get_admin_blog_post(post_id)
         if post.status != "published":
@@ -1672,7 +1713,7 @@ class AdminBlogCommentListView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         return super().get(request, *args, **kwargs)
 
@@ -1701,7 +1742,7 @@ class AdminBlogCommentHideView(APIView):
     )
     def post(self, request, comment_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         comment = _get_admin_comment(comment_id)
         if comment.status == "hidden":
@@ -1739,7 +1780,7 @@ class AdminBlogCommentDeleteView(APIView):
     )
     def delete(self, request, comment_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         comment = _get_admin_comment(comment_id)
         comment.mark_deleted()
@@ -2038,7 +2079,7 @@ class AdminFlagListView(generics.ListAPIView):
     )
     def get(self, request, *args, **kwargs):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         return super().get(request, *args, **kwargs)
 
@@ -2063,7 +2104,7 @@ class AdminFlagDetailView(APIView):
     )
     def get(self, request, flag_id):
         auth_service = build_auth_service()
-        async_to_sync(require_roles)(request, auth_service, "admin")
+        async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         flag = _get_admin_flag(flag_id)
         return Response(FlagOutSerializer(flag).data)
@@ -2100,7 +2141,7 @@ class AdminFlagResolveView(APIView):
     )
     def post(self, request, flag_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         flag = _get_admin_flag(flag_id)
         if flag.status != "open":
@@ -2187,7 +2228,7 @@ class AdminFlagDismissView(APIView):
     )
     def post(self, request, flag_id):
         auth_service = build_auth_service()
-        claims = async_to_sync(require_roles)(request, auth_service, "admin")
+        claims = async_to_sync(require_roles_either)(request, build_session_service(), auth_service, "admin")
         enforce_admin_rate_limit(request)
         flag = _get_admin_flag(flag_id)
         if flag.status != "open":

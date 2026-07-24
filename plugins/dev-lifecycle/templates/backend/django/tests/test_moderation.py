@@ -373,7 +373,7 @@ def test_resolve_ban_author_bans_a_comment_author_and_revokes_sessions(
     post = _create_post(api_client, headers)
     author = _register_and_verify(api_client, email_sender, email="commenter@example.com", password=_PASSWORD)
     login = api_client.post(
-        "/auth/login", {"email": "commenter@example.com", "password": _PASSWORD}, format="json"
+        "/auth/login", {"email": "commenter@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert login.status_code == 200, login.content
     refresh_token = login.json()["refresh_token"]
@@ -430,7 +430,7 @@ def test_resolve_ban_author_rolls_back_the_ban_if_flag_save_fails(
     post = _create_post(api_client, headers)
     author = _register_and_verify(api_client, email_sender, email="rollback@example.com", password=_PASSWORD)
     login = api_client.post(
-        "/auth/login", {"email": "rollback@example.com", "password": _PASSWORD}, format="json"
+        "/auth/login", {"email": "rollback@example.com", "password": _PASSWORD}, format="json", HTTP_X_AUTH_MODE="bearer"
     )
     assert login.status_code == 200, login.content
     refresh_token = login.json()["refresh_token"]

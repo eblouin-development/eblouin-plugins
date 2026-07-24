@@ -472,21 +472,16 @@
           "auth"
         ],
         "summary": "Logout",
-        "description": "Ends the caller's session, whichever transport they authenticated\nwith. **TRIPLE-SOURCE**, decided per request by which credential is\nactually present \u2014 never by a header the client declares, so a forged\nor absent cookie cannot claim a path it does not hold.\n\n- **Session path** (`session_id` cookie present) \u2014 the default.\n  `enforce_csrf(request)` runs FIRST: logout is state-changing, so a\n  request with a missing/blank/mismatched `X-CSRF-Token` is rejected\n  403 at that gate and never reaches the revocation. Past the gate,\n  `SessionService.revoke` kills the server-side row \u2014 the half that\n  actually matters, since it stops the id authenticating even for a\n  client that ignores the cookie-delete instruction \u2014 and\n  `clear_session_cookies` clears both cookies. `revoke` is idempotent\n  and never raises (see its own docstring), so a stale or unknown\n  session id still 204s rather than becoming an oracle that\n  distinguishes real ids from invented ones.\n- **Refresh-cookie path** (`refresh_token` cookie present): unchanged\n  prior behavior \u2014 CSRF enforced first, then `AuthService.logout`\n  revokes the whole token family, then `clear_auth_cookies`.\n- **Bearer path** (no cookie at all): unchanged \u2014 the body's\n  `refresh_token`, no CSRF check, 204 either way.\n\nChecked in that order because the session cookie is the default\ncredential; a request carrying both (only possible mid-migration, and\ndiscouraged \u2014 see the vendored `_cookies.py`'s \"running both paths at\nonce\") has its session ended, which is the credential that would\notherwise still authenticate every route.\n\n**The request BODY is optional** (`RefreshRequest | None`), because a\nsession client genuinely has no refresh token to send \u2014 requiring one\nwould force it to invent a value to satisfy `RefreshRequest`'s\n`min_length=1`, and a 422 on logout for a client with nothing to put\nin the body would be an absurd contract. The body is read only on the\nbearer path, where it is the credential; a bearer request that omits it\nstill 204s, since logout is idempotent and there is nothing to\nrevoke.",
+        "description": "Ends the caller's session, whichever transport they authenticated\nwith. **TRIPLE-SOURCE**, decided per request by which credential is\nactually present \u2014 never by a header the client declares, so a forged\nor absent cookie cannot claim a path it does not hold.\n\n- **Session path** (`session_id` cookie present) \u2014 the default.\n  `enforce_csrf(request)` runs FIRST: logout is state-changing, so a\n  request with a missing/blank/mismatched `X-CSRF-Token` is rejected\n  403 at that gate and never reaches the revocation. Past the gate,\n  `SessionService.revoke` kills the server-side row \u2014 the half that\n  actually matters, since it stops the id authenticating even for a\n  client that ignores the cookie-delete instruction \u2014 and\n  `clear_session_cookies` clears both cookies. `revoke` is idempotent\n  and never raises (see its own docstring), so a stale or unknown\n  session id still 204s rather than becoming an oracle that\n  distinguishes real ids from invented ones.\n- **Refresh-cookie path** (`refresh_token` cookie present): unchanged\n  prior behavior \u2014 CSRF enforced first, then `AuthService.logout`\n  revokes the whole token family, then `clear_auth_cookies`.\n- **Bearer path** (no cookie at all): unchanged \u2014 the body's\n  `refresh_token`, no CSRF check, 204 either way.\n\nChecked in that order because the session cookie is the default\ncredential; a request carrying both (only possible mid-migration, and\ndiscouraged \u2014 see the vendored `_cookies.py`'s \"running both paths at\nonce\") has its session ended, which is the credential that would\notherwise still authenticate every route.\n\n**`RefreshRequest.refresh_token` is optional** (defaulting to `\"\"`),\nbecause a session client genuinely has no refresh token to send \u2014 see\nthat schema's own docstring. The field is read only on the bearer\npath, where it is the credential; a bearer request that omits it still\n204s, since logout is idempotent and there is nothing to revoke.",
         "operationId": "logout_auth_logout_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/RefreshRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Payload"
+                "$ref": "#/components/schemas/RefreshRequest",
+                "default": {
+                  "refresh_token": ""
+                }
               }
             }
           }
@@ -3948,16 +3943,14 @@
         "properties": {
           "refresh_token": {
             "type": "string",
-            "minLength": 1,
-            "title": "Refresh Token"
+            "title": "Refresh Token",
+            "default": ""
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "refresh_token"
-        ],
-        "title": "RefreshRequest"
+        "title": "RefreshRequest",
+        "description": "`POST /auth/refresh`'s and `POST /auth/logout`'s request body.\n\n**`refresh_token` is optional, defaulting to `\"\"`.** It was required\n(`min_length=1`) when every client of these routes held a refresh\ntoken; a session client holds none, and would otherwise have to\nfabricate a value to satisfy a field that means nothing on its\ntransport \u2014 or be 422'd for honestly omitting it. Both handlers read\nthe session cookie before they look at this field, so a session-mode\nrequest never reaches it at all.\n\nDropping `min_length=1` costs nothing on the JWT path: an empty\n`refresh_token` presented to `/auth/refresh` raises `InvalidToken` \u2192\n401, which is the correct answer for an invalid token and is\ndeliberately indistinguishable from every other invalid-token case\n(see `_core.InvalidToken`'s docstring). Previously it produced a 422\ninstead \u2014 a *different* response shape for one specific kind of bad\ntoken, which was itself a small information leak. `/auth/logout` is\nidempotent and 204s either way."
       },
       "RegisterRequest": {
         "properties": {

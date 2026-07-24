@@ -36,12 +36,14 @@ async_to_sync(...)`"). `has_permission` below bridges the identical way:
 inside the sync method DRF actually invokes — no new bridging idiom, just
 this block's existing one applied at a different call site.
 
-**Auth service construction.** `build_auth_service()` (`core/security/
-auth/stores.py`) — the SAME zero-argument factory `core/views.py`'s
-`MeView`/`RegisterView`/`LoginView`/... already call — is built fresh on
-every `has_permission` invocation, matching that factory's own documented
-"cheap, stateless, no caching" posture (see its own docstring: a fresh
-`AuthService` and fresh, `__init__`-less stores every call is fine).
+**Auth service construction.** `build_session_service()` and
+`build_auth_service()` (`core/security/auth/stores.py`) — the SAME
+zero-argument factories `core/views.py`'s own views already call — are
+built fresh on every `has_permission` invocation, matching those factories'
+documented "cheap, stateless, no caching" posture (a fresh service and
+fresh, `__init__`-less stores every call is fine). Both are constructed
+because this gate serves both transports; only the one matching the
+credential the request actually carries does any work.
 
 **Exceptions propagate, never caught here.** `require_roles` raises either
 `core.security.auth._core.InvalidToken` (a missing/malformed/expired
@@ -77,8 +79,8 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from rest_framework.permissions import BasePermission
 
-from core.security.auth import require_roles
-from core.security.auth.stores import build_auth_service
+from core.security.auth import require_roles_either
+from core.security.auth.stores import build_auth_service, build_session_service
 
 
 def has_role(*roles: str) -> type[BasePermission]:
@@ -101,8 +103,20 @@ def has_role(*roles: str) -> type[BasePermission]:
 
     class _HasRole(BasePermission):
         def has_permission(self, request: Any, view: Any) -> bool:
-            auth_service = build_auth_service()
-            async_to_sync(require_roles)(request, auth_service, *roles)
+            # `require_roles_either`, not `require_roles`: this gate must
+            # accept BOTH transports, resolving whichever credential the
+            # request actually carries -- the `session_id` cookie first
+            # (this block's default for browsers), falling back to a bearer
+            # token (native/mobile, service-to-service). The session-first
+            # ordering is load-bearing, not cosmetic: see that helper's own
+            # docstring on why checking bearer first would let an
+            # attacker-supplied `Authorization` header win over a victim's
+            # ambient session cookie. Role membership itself is identical
+            # either way, since `SessionPrincipal` and `AccessClaims` agree
+            # on `roles`.
+            async_to_sync(require_roles_either)(
+                request, build_session_service(), build_auth_service(), *roles
+            )
             return True
 
     return _HasRole

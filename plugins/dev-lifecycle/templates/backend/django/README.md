@@ -45,6 +45,7 @@ wire-surface conformance proof" below.
 - The Item model
 - Conformance (Step 1 vs. Step 2)
   - Step 4: OpenAPI schema + wire-surface conformance proof (#27)
+- Sessions (the default auth path)
 - Security
   - Security composition (Stage 4 Step 3, #27)
 - Database & migrations
@@ -907,6 +908,109 @@ online). Verification script written ad hoc for this run (not committed —
 `tests/test_cookie_auth.py`, hermetic against sqlite, is the durable,
 CI-running proof of this exact behavior; this transcript is the one-time
 real-PG16 confirmation).
+
+## Sessions (the default auth path)
+
+**A browser client authenticating against this block gets a server-side
+session, not a JWT.** `POST /auth/login` issues an opaque session id in an
+`HttpOnly; Secure; SameSite=Lax; Path=/` `session_id` cookie unless the
+caller explicitly asks for another transport, and every protected view
+resolves that cookie. The JWT paths remain fully wired for native/mobile
+clients and service-to-service callers — this is a default, not a
+deprecation.
+
+Behaviourally identical to `backend/fastapi`'s own session path, against
+the same wire contract (`tests/test_schema_conformance.py` holds the two
+byte-identical); see that block's README "Sessions" section for the
+side-by-side session-vs-JWT comparison, and the vendored
+`core/security/auth/_sessions.py`'s module docstring for the full
+argument. The short version: a JWT is valid because it says it is, so
+logout, bans, and privilege revocation only land after a TTL elapses. A
+session's authority lives in a row, so revocation lands on the next
+request, roles are read live, an idle timeout is enforceable, and nothing
+readable sits in the browser. The cost is one indexed `sessions` lookup
+plus one `users` lookup per authenticated request.
+
+### Wiring
+
+- **`core/models.py`** → the `Session` model / `sessions` table (migration
+  `0007_sessions`). Stores the SHA-256 hash of the session id, never the
+  id; no roles column, deliberately; `PROTECT` on the user FK.
+- **`core/security/auth/stores.py`** → `DjangoSessionStore` (async ORM,
+  durability from Django's own autocommit — see
+  `DjangoRefreshTokenStore`'s docstring for that posture) and
+  `build_session_service()`.
+- **`core/views.py`** → `LoginView` defaults to session mode;
+  `LogoutView` is triple-source; every role-gated view resolves through
+  `require_roles_either` / `resolve_principal_either`, which take
+  whichever credential the request actually carries, session first.
+- **`core/security/auth/permissions.py`** → `has_role(...)`, the DRF
+  permission class, now dual-transport for the same reason.
+- **`core/security/auth/csrf_middleware.py`** → `SessionCsrfMiddleware`,
+  registered in `config/settings.py`'s `MIDDLEWARE`. See "CSRF" below.
+- **`config/settings.py`** → `SESSION_IDLE_TTL_SECONDS` (12h, sliding),
+  `SESSION_ABSOLUTE_TTL_SECONDS` (7d, hard ceiling),
+  `SESSION_TOUCH_INTERVAL_SECONDS` (60s, write-rate bound). A session must
+  be inside BOTH deadlines. None of the three is a secret — a session id
+  is opaque rather than signed, so unlike `JWT_SIGNING_KEY` there is
+  nothing here to load from a secret store and nothing to fail closed on.
+
+### Picking a transport
+
+`POST /auth/login` reads `X-Auth-Mode`. It is never inferred from
+`User-Agent` or any other signal, and an unrecognized value falls to the
+default — the safer direction for a mistake to fall.
+
+| `X-Auth-Mode` | Result |
+| --- | --- |
+| absent / `session` / anything unrecognized | **Session cookie** (default). Body: `token_type: "session"`, both token fields `""` — deliberately no token for the client to hold. |
+| `bearer` | Access + refresh JWTs in the body. No cookies. |
+| `cookie` | Refresh JWT in a `Path=/auth` cookie. Superseded by session mode; kept for a project mid-migration. |
+
+`POST /auth/logout` decides by which credential is actually PRESENT
+(session cookie → refresh cookie → body), so a forged or absent cookie
+cannot claim a path it does not hold. There is **no refresh endpoint on
+the session path**: `resolve` slides the idle deadline forward on every
+authenticated request, so the credential renews itself as a side effect of
+being used, up to the absolute ceiling.
+
+### CSRF
+
+The session cookie is `Path=/`, so **every** unsafe-method view is a CSRF
+target, not just `/auth/*`. `SessionCsrfMiddleware` enforces the
+double-submit check (`X-CSRF-Token` header must equal the `csrf_token`
+cookie, constant-time compared) on every `POST`/`PUT`/`PATCH`/`DELETE`
+that carries a session cookie. A per-view call would eventually be
+forgotten on some new view; a middleware cannot be. It skips safe methods,
+skips requests with no session cookie (a bearer client has no ambient
+credential and must not be asked to echo a token it was never given), and
+exempts exactly `POST /auth/login`. Logout is NOT exempt.
+
+**This is not Django's own `CsrfViewMiddleware` and does not replace it** —
+that one protects `django.contrib.sessions`' cookie with its own
+`csrftoken`/`X-CSRFToken` pair. The two are independent and can coexist.
+The middleware renders its own 403 envelope rather than raising, because
+DRF's exception handler is per-view and runs after middleware; it reads
+status and code from the same `AUTH_ERROR_HTTP` table `core/exceptions.py`
+uses, so the two cannot drift.
+
+### Revoking everywhere
+
+`build_account_service()` wires BOTH revocation seams, so a password reset
+kills every refresh-token family AND every server-side session. Wiring only
+one would leave a reset account half-revoked — an attacker's session cookie
+would keep authenticating despite every JWT being killed.
+
+### Tests
+
+`tests/test_session_auth.py` (27 tests) mirrors `backend/fastapi`'s suite
+of the same name: login defaults to session mode and hands the client no
+token, cookie flags, one `sessions` row and no refresh-token row, a fresh
+id per login (session fixation), logout revoking on the very next request,
+idempotent logout with no body required, CSRF on `/auth/*` and on a
+non-auth view alike, safe methods and bearer clients exempt, the
+middleware's envelope matching the serializer's shape, live role
+revocation, password reset killing every session, and both deadlines.
 
 ## Security
 
