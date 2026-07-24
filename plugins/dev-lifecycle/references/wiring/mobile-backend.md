@@ -15,7 +15,7 @@ sources:
 
 # Mobile, backend-specific
 
-**Everything about how `apps/mobile` (the Expo block) talks to the backend that's *specific* to being a native app** — bearer/SecureStore auth (as opposed to web's cookie mode), the single-flight refresh engine, deep links for the account-lifecycle endpoints, and where push notifications would slot in. `references/wiring/auth-end-to-end.md` covers the shared backend contract and the web-vs-mobile mode split in full; this doc goes one level deeper into the mobile side only. Subordinate to a project's existing conventions where one already exists.
+**Everything about how `apps/mobile` (the Expo block) talks to the backend that's *specific* to being a native app** — bearer/SecureStore auth (as opposed to web's session-cookie default), the single-flight refresh engine, deep links for the account-lifecycle endpoints, and where push notifications would slot in. `references/wiring/auth-end-to-end.md` covers the shared backend contract and the web-vs-mobile mode split in full; this doc goes one level deeper into the mobile side only. Subordinate to a project's existing conventions where one already exists.
 
 ## Contents
 - Bearer mode, restated for this doc's scope
@@ -27,14 +27,14 @@ sources:
 - Related canon
 
 ## Bearer mode, restated for this doc's scope
-`templates/mobile/expo/` (materialized to `apps/mobile/`) configures `@repo/api-client` in **bearer mode** — the client's default, and the *only* mode ever enabled on native:
+`templates/mobile/expo/` (materialized to `apps/mobile/`) configures `@repo/api-client` in **bearer mode, explicitly** — the *only* mode ever enabled on native:
 
 ```ts
 // apps/mobile/app/_layout.tsx
-configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "" });
+configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "", mode: "bearer" });
 ```
 
-`cookieMode` is never passed. There is no browser, so there is no ambient-cookie CSRF class to defend against (`references/wiring/auth-end-to-end.md`'s "Where CSRF applies" covers why bearer mode needs none) — cookies would only add friction native HTTP clients handle poorly, for zero security gain. The access token stays in memory (in `src/auth/authEngine.ts`'s state); the refresh token goes to a real OS-backed secret store instead of a cookie.
+`mode: "bearer"` must be passed, not omitted — the backend's own default is now a server-side session (the browser posture), so an unconfigured client would silently be handed a session cookie it cannot properly store instead of the token pair `authEngine.ts` expects. Session/cookie mode is never enabled on native. There is no browser, so there is no ambient-cookie CSRF class to defend against (`references/wiring/auth-end-to-end.md`'s "Where CSRF applies" covers why bearer mode needs none) — cookies would only add friction native HTTP clients handle poorly, for zero security gain. The access token stays in memory (in `src/auth/authEngine.ts`'s state); the refresh token goes to a real OS-backed secret store instead of a cookie.
 
 ## The `expo-secure-store` refresh-token seam
 `templates/mobile/expo/src/auth/secureStore.ts` is the **only** place `expo-secure-store` is touched — it implements the auth engine's `TokenStorage` interface (`get`/`set`/`clear`) so `authEngine.ts` itself stays framework-free and unit-testable against a fake storage (`authEngine.test.ts`). Two deliberate hardening choices in `secureStore.ts`'s `SecureStoreOptions`:
@@ -66,7 +66,7 @@ The web side of the same flow is unbuilt too — this is a real backend contract
 
 ## Wiring checklist
 1. **Backend** — `/auth/*` (login/refresh/logout/me) plus the account-lifecycle trio (verify-email/request-password-reset/reset-password) exposed and generating single-use tokens (`templates/backend/fastapi/app/models/single_use_token.py` or the Django equivalent).
-2. **Mobile** — `configureApiClient({ baseUrl })` at `app/_layout.tsx`, bearer mode, no `cookieMode`; `EXPO_PUBLIC_API_BASE_URL` set per environment (LAN IP or tunnel for a physical device — `localhost` on-device means the device itself).
+2. **Mobile** — `configureApiClient({ baseUrl, mode: "bearer" })` at `app/_layout.tsx`, `mode` passed EXPLICITLY; `EXPO_PUBLIC_API_BASE_URL` set per environment (LAN IP or tunnel for a physical device — `localhost` on-device means the device itself).
 3. **Storage** — confirm `secureStore.ts`'s `TokenStorage` is the only place the refresh token is written; never persist it via `AsyncStorage`.
 4. **Deep links** — set `app.json`'s `scheme` to the project's real scheme before any build that needs linking to work; add the verify/reset screens per "Deep links" above if the project needs those flows on mobile.
 5. Run `templates/mobile/expo/src/auth/authEngine.test.ts` after touching the engine — it's the hermetic proof of login/401-refresh-retry/rotation/terminal-refresh/logout behavior.

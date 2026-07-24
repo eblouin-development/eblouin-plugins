@@ -49,5 +49,5 @@ Production/preview builds go through **EAS Build** (`eas build --profile <previe
 
 ## What runs where in this kit
 - **JS/TS app code** — `app/` (Expo Router routes) + `src/` (auth context, the SecureStore seam). Bundled by Metro. This is the only code in the managed template.
-- **`@repo/api-client`** — the shared workspace package, imported for the generated auth hooks; configured once at entry in **bearer mode** (`configureApiClient({ baseUrl })`, `cookieMode` omitted). Never enable cookie mode on native.
+- **`@repo/api-client`** — the shared workspace package, imported for the generated auth hooks; configured once at entry in **bearer mode, explicitly** (`configureApiClient({ baseUrl, mode: "bearer" })` — the backend's own default is now a server-side session, so `mode` must be passed, not omitted). Never enable session or cookie mode on native.
 - **Hermetic checks** (`tsc`, `eslint`, `vitest`) run in CI and in-sandbox against the JS layer. **Device/native builds** (`expo prebuild`, EAS, live auth against a running backend) are documented-manual.

@@ -164,7 +164,7 @@ async function streamSummary(recordId: string, onDelta: (text: string) => void) 
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ record_id: recordId }),
-    credentials: cookieMode ? "include" : "omit",
+    credentials: isSessionMode ? "include" : "omit",
   });
   if (!response.ok || !response.body) throw await unwrapError(response);
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

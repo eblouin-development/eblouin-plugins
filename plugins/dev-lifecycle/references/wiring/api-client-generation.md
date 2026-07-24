@@ -51,17 +51,17 @@ Every generated hook calls through `src/mutator.ts`'s `customFetch`, configured 
 
 ```ts
 import { configureApiClient } from "@repo/api-client";
-configureApiClient({ baseUrl, cookieMode, getAccessToken });
+configureApiClient({ baseUrl, mode });
 ```
 
 - **`baseUrl`** — the backend origin, sourced from the consuming app's own framework-prefixed env var (never a bare `process.env.API_BASE_URL` — see "Configuration" in `templates/packages/api-client/README.md` for why that breaks under Vite/Next/Expo). Unconfigured resolves to `""` (same-origin relative URLs).
-- **`cookieMode`** — `false` (bearer) by default; `apps/web`/`apps/admin` opt in with `cookieMode: true` to get the browser cookie/CSRF seam; Expo never sets it.
-- **`getAccessToken`** — an optional in-memory access-token getter (default-off); when supplied, the mutator injects `Authorization: Bearer <token>` on every call that doesn't already carry one.
+- **`mode`** — `"session"` | `"bearer"` | `"cookie"`, library-defaults to `"bearer"` (the safe-to-get-wrong choice — see `templates/packages/api-client/README.md`'s "Auth modes" for why the library default isn't the same as the backend's own default). `apps/web`/`apps/admin` pass `mode: "session"` explicitly — the PREFERRED browser posture, an opaque `HttpOnly` session cookie the backend issues by default; `apps/mobile` passes `mode: "bearer"` explicitly (native has no ambient-cookie problem to begin with and a real OS-backed secret store instead — passing it explicitly matters because bearer is no longer the *backend's* default, only the client library's). `mode: "cookie"` (JWT refresh token in an `HttpOnly; Path=/auth` cookie) is superseded, kept for a project mid-migration off it.
+- **`getAccessToken`** — an optional in-memory access-token getter (default-off, and IGNORED entirely in session mode, which holds no token); when supplied in bearer or cookie mode, the mutator injects `Authorization: Bearer <token>` on every call that doesn't already carry one.
 
-The mutator's response shape is `{ data, status, headers }` (not a thrown error for a documented non-2xx) — see `references/wiring/frontend-backend-contract.md` for how `unwrap()` turns that into something react-query treats as an error. Full mode-by-mode detail (cookie vs bearer, the CSRF echo, RBAC) lives in `references/wiring/auth-end-to-end.md`.
+The mutator's response shape is `{ data, status, headers }` (not a thrown error for a documented non-2xx) — see `references/wiring/frontend-backend-contract.md` for how `unwrap()` turns that into something react-query treats as an error. Full mode-by-mode detail (session vs bearer vs cookie, the CSRF echo, RBAC) lives in `references/wiring/auth-end-to-end.md`.
 
 ## Three consumers, one client
-`apps/web` (`templates/frontend/vite-spa/` or `templates/frontend/nextjs/`), `apps/admin` (`templates/frontend/nextjs-admin/`), and `apps/mobile` (`templates/mobile/expo/`) all depend on `@repo/api-client` as a `workspace:*` package and call `configureApiClient` once at their own entry point — `apps/web/src/main.tsx` (Vite) or a client-side root layout (Next), `apps/admin`'s equivalent, and `apps/mobile/app/_layout.tsx`. None of them hand-write a `fetch` call or a request/response interface: the generated types **are** the contract (`references/frontend/typescript.md`'s "Types from a single source of truth"). The only difference between consumers is their `configureApiClient` args — `apps/web`/`apps/admin` pass `cookieMode: true` plus `getAccessToken` wired to `@repo/web-shared`'s in-memory token; `apps/mobile` passes neither (bearer mode, token attached by its own auth engine per call — see `references/wiring/mobile-backend.md`).
+`apps/web` (`templates/frontend/vite-spa/` or `templates/frontend/nextjs/`), `apps/admin` (`templates/frontend/nextjs-admin/`), and `apps/mobile` (`templates/mobile/expo/`) all depend on `@repo/api-client` as a `workspace:*` package and call `configureApiClient` once at their own entry point — `apps/web/src/main.tsx` (Vite) or a client-side root layout (Next), `apps/admin`'s equivalent, and `apps/mobile/app/_layout.tsx`. None of them hand-write a `fetch` call or a request/response interface: the generated types **are** the contract (`references/frontend/typescript.md`'s "Types from a single source of truth"). The only difference between consumers is their `configureApiClient` args — `apps/web`/`apps/admin` pass `mode: "session"` (no token to hold, so no `getAccessToken` either); `apps/mobile` passes `mode: "bearer"` (token attached by its own auth engine per call — see `references/wiring/mobile-backend.md`).
 
 ## The manual barrel: `src/index.ts`
 `templates/packages/api-client/src/index.ts` is **hand-maintained**, not generated — orval writes per-tag files under `src/generated/endpoints/<tag>/`, but nothing re-exports them from the package root automatically. Every tag needs an explicit `export *` line added here:
@@ -87,7 +87,7 @@ Six tags exist today — `auth`, `admin`, `blog`, `health`, `items`, `moderation
 1. **Backend** — export the schema: `python -m app.export_openapi packages/api-client/openapi.json` (FastAPI is always the export source, even on a Django project — see "Which backend generates the schema").
 2. **Generate** — `just client-generate` (export + orval); commit `openapi.json` and the regenerated `src/generated/**` together.
 3. **Barrel** — if a new OpenAPI tag landed, add its `export *` line to `templates/packages/api-client/src/index.ts` by hand.
-4. **Consumers** — `apps/web`, `apps/admin`, `apps/mobile` each call `configureApiClient` once at startup with their own `baseUrl`/`cookieMode`/`getAccessToken`, then import hooks from `@repo/api-client`'s root, never `src/generated/*` directly.
+4. **Consumers** — `apps/web`, `apps/admin`, `apps/mobile` each call `configureApiClient` once at startup with their own `baseUrl`/`mode`, then import hooks from `@repo/api-client`'s root, never `src/generated/*` directly.
 5. **Django only** — run `templates/backend/django/tests/test_schema_conformance.py` and keep `_PENDING_PARITY_OPS` accurate (empty once the new surface has full parity).
 
 ## Related canon

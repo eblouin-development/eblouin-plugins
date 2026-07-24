@@ -36,7 +36,7 @@ Routes are **files under `app/`**, not a route config object — the file tree *
 
 ## Layouts and the root layout
 A `_layout.tsx` exports a navigator — commonly `<Stack>` (from `expo-router`) — and renders child routes through it. The root layout is the single place to:
-1. Configure `@repo/api-client` once (`configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "" })`) — bearer mode, `cookieMode` omitted.
+1. Configure `@repo/api-client` once (`configureApiClient({ baseUrl: process.env.EXPO_PUBLIC_API_BASE_URL ?? "", mode: "bearer" })`) — bearer mode, `mode` passed EXPLICITLY (the backend now defaults browser clients to a session cookie, so an omitted mode is no longer safe on native).
 2. Mount providers: `QueryClientProvider`, `SafeAreaProvider`, and the app's `AuthProvider`.
 3. Drive the **auth gate** (below).
 
