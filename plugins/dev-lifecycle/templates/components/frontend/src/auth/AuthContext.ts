@@ -1,30 +1,34 @@
 import { createContext } from "react";
 import type { PrincipalOut } from "@repo/api-client";
-import type { AccessTokenClaims } from "../jwt/decodeAccessTokenClaims";
 
 export interface AuthState {
-  /** True once an access token is held in memory (i.e. logged in this tab). */
+  /** True once `GET /auth/me` has resolved a live principal — i.e. this
+   *  tab holds a valid session cookie. With no in-memory token, this query
+   *  IS the signal; see `AuthProvider`'s own docstring. */
   isAuthenticated: boolean;
-  /** UX-only claims (roles/sub) decoded from the current access token. Empty
-   *  when logged out. The REAL authorization gate is always the server 403. */
-  claims: AccessTokenClaims;
-  /** The principal resolved from `GET /auth/me` (id + email), or null. */
+  /** The principal resolved from `GET /auth/me` (id, email, and — since
+   *  session mode carries no JWT for the client to decode locally —
+   *  `roles`, UI-only and non-authoritative; see `PrincipalOut`'s own
+   *  docstring), or `null` when not authenticated. */
   principal: PrincipalOut | null;
-  /** True while a login, refresh, or logout call is in flight. */
+  /** True while a login, logout, or the initial/a refetching `/auth/me`
+   *  call is in flight. */
   isPending: boolean;
 }
 
 export interface AuthContextValue extends AuthState {
-  /** Log in (cookie mode): stores the access token in memory, decodes roles,
-   *  and loads the principal. Throws an `ApiError` on bad credentials (401) or
-   *  a validation failure (422) for the caller's form to surface. */
+  /** Log in: the backend sets the `HttpOnly` session cookie (see
+   *  `references/wiring/auth-end-to-end.md`), then this refetches
+   *  `/auth/me` to load the principal and invalidates every other cached
+   *  query so nothing from a PRIOR identity in this tab leaks into the new
+   *  one. Throws an `ApiError` on bad credentials (401) or a validation
+   *  failure (422) for the caller's form to surface. */
   login: (email: string, password: string) => Promise<void>;
-  /** Log out: best-effort server call, then clears in-memory token + query cache. */
+  /** Log out: best-effort server call (revokes the session server-side —
+   *  the half that actually matters), then clears the query cache. */
   logout: () => Promise<void>;
-  /** Single-flight token refresh. Resolves true if rotated, false if the
-   *  session is unrecoverable (memory cleared + `onAuthExpired` fired). */
-  refresh: () => Promise<boolean>;
-  /** UX-only role check against the decoded `roles` claim. */
+  /** UI-only role check against `principal.roles`. Never the real
+   *  authorization gate — the server's 403 on the underlying call is. */
   hasRole: (role: string) => boolean;
 }
 

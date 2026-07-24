@@ -5,6 +5,26 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * `POST /auth/login`'s and `POST /auth/refresh`'s response body,
+ * shared by BOTH authentication transports so the wire schema stays one
+ * shape.
+ *
+ * **In session mode (the default), all three fields are effectively
+ * empty**: `access_token` and `refresh_token` are `""` and `token_type`
+ * is `"session"`. That is not a placeholder — it is the honest
+ * representation of what session mode does, which is hand the client no
+ * token at all. The credential is the `HttpOnly` `session_id` cookie the
+ * browser stores and JavaScript cannot read; having nothing in the
+ * response body for the client to keep is precisely the property that
+ * leaves an XSS payload nothing to exfiltrate.
+ *
+ * **In bearer mode**, `access_token`/`refresh_token` carry the real JWTs
+ * and `token_type` is `"bearer"`, exactly as before.
+ *
+ * A client reads `token_type` to know which it got, rather than
+ * inspecting the token fields for emptiness.
+ */
 export interface TokenResponse {
   access_token: string;
   refresh_token: string;

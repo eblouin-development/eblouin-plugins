@@ -1,174 +1,131 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import {
+  getMeAuthMeGetQueryKey,
   useLoginAuthLoginPost,
   useLogoutAuthLogoutPost,
   useMeAuthMeGet,
-  useRefreshAuthRefreshPost,
 } from "@repo/api-client";
 import type { PrincipalOut } from "@repo/api-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../errors/ApiError";
 import { isErrorEnvelope } from "../errors/errorEnvelope";
-import { decodeAccessTokenClaims } from "../jwt/decodeAccessTokenClaims";
-import {
-  addExpiredListener,
-  clearRefreshHandler,
-  notifyExpired,
-  setAccessToken,
-  setRefreshHandler,
-} from "./authBridge";
+import { addExpiredListener } from "./authBridge";
 import { AuthContext } from "./AuthContext";
 import type { AuthContextValue } from "./AuthContext";
 
 export interface AuthProviderProps {
   children: ReactNode;
   /**
-   * Fired when a token refresh ultimately fails and the session is
-   * unrecoverable — the app typically redirects to its login route here. Runs
-   * AFTER in-memory auth state is cleared. (createQueryClient's `onAuthExpired`
-   * option, if set, also fires — both are registered listeners.)
+   * Fired when the session turns out to be invalid — either a login/refetch
+   * of `/auth/me` came back 401, or a 401 from ANY other request notified
+   * this provider via the auth bridge (see `authBridge.ts`). The app
+   * typically redirects to its login route here. Runs AFTER the `/auth/me`
+   * query cache is cleared. (`createQueryClient`'s `onAuthExpired` option, if
+   * set, also fires — both are registered listeners, they don't compete.)
    */
   onAuthExpired?: () => void;
 }
 
 /**
- * The cookie-mode auth lifecycle from `references/wiring/auth-end-to-end.md`,
+ * The session-mode auth lifecycle from `references/wiring/auth-end-to-end.md`,
  * as a portable React provider. MUST be mounted inside a `QueryClientProvider`
- * (it uses the generated React Query hooks). The access token lives ONLY in
- * memory — a React state (for re-render) mirrored into the module-scoped auth
- * bridge (so the api-client mutator's `getAccessToken` and the QueryClient's
- * 401 handler can reach it). It is NEVER written to localStorage/sessionStorage;
- * the refresh token lives only in the backend's HttpOnly cookie and is never
- * seen by this code. The empty-string `refresh_token` in cookie-mode response
- * bodies is deliberately ignored.
+ * (it uses the generated React Query hooks) and paired with
+ * `configureApiClient({ mode: "session" })` (`@repo/api-client`'s own
+ * README, "Auth modes").
+ *
+ * **There is no token anywhere in this component, and that is the point.**
+ * The backend's default credential is an opaque, `HttpOnly` `session_id`
+ * cookie the browser attaches automatically and this code never reads. That
+ * removes the entire "hold an access token in memory, decode its claims,
+ * single-flight a refresh, rotate on 401" machinery an earlier, bearer/
+ * cookie-JWT-mode version of this component carried — there is no access
+ * token to hold, no claims to decode, and no refresh ENDPOINT to call (a
+ * session's idle deadline slides forward as a side effect of the backend
+ * resolving the cookie on every authenticated request; see the auth
+ * component's `_sessions.py` module docstring). What replaces all of it:
+ * `GET /auth/me` IS the "am I logged in, and as whom" signal, refetched
+ * after login/on a session-invalidated notification, nothing more.
  */
 export const AuthProvider = ({ children, onAuthExpired }: AuthProviderProps): ReactNode => {
   const queryClient = useQueryClient();
   const { mutateAsync: loginAsync, isPending: loginPending } = useLoginAuthLoginPost();
-  const { mutateAsync: refreshAsync, isPending: refreshPending } = useRefreshAuthRefreshPost();
   const { mutateAsync: logoutAsync, isPending: logoutPending } = useLogoutAuthLogoutPost();
 
-  const [accessToken, setAccessTokenState] = useState<string | null>(null);
-
-  const applyToken = useCallback((token: string): void => {
-    setAccessTokenState(token);
-    setAccessToken(token); // bridge → mutator getAccessToken + QueryClient
-  }, []);
-
-  const clearAuth = useCallback((): void => {
-    setAccessTokenState(null);
-    setAccessToken(null);
-  }, []);
-
-  // Principal from /auth/me — enabled only once a token is in memory, and only
-  // read when it resolved 200 (a 401 here just means "no principal yet").
-  const meQuery = useMeAuthMeGet({
-    query: {
-      enabled: accessToken !== null,
-      retry: false,
-      staleTime: Infinity,
-    },
-  });
-  const meData = meQuery.data;
+  // Always enabled, unlike the old token-gated version: with a cookie-borne
+  // credential there is no in-memory signal for "might be logged in" the way
+  // a held access token used to be -- this query itself is that signal.
+  // `retry: false` so an honest "not logged in" 401 isn't retried against a
+  // session that is deliberately absent; `staleTime` matches
+  // `createQueryClient`'s own query default so this doesn't refetch on every
+  // remount for no reason.
+  const meQuery = useMeAuthMeGet({ query: { retry: false, staleTime: 30_000 } });
   const principal: PrincipalOut | null =
-    meData && meData.status === 200 ? meData.data : null;
+    meQuery.data && meQuery.data.status === 200 ? meQuery.data.data : null;
 
-  const claims = useMemo(() => decodeAccessTokenClaims(accessToken), [accessToken]);
-
-  // --- refresh: single-flight, rotation, invalidate ------------------------
-  const inFlight = useRef<Promise<boolean> | null>(null);
-
-  const doRefresh = useCallback(async (): Promise<boolean> => {
-    try {
-      const res = await refreshAsync({ data: { refresh_token: "" } });
-      if (res.status === 200) {
-        applyToken(res.data.access_token);
-        // Rotated token in place; refetch everything so the failed call
-        // retries with the new Authorization header.
-        await queryClient.invalidateQueries();
-        return true;
-      }
-      // Refresh itself was rejected (reuse-detected/expired family) → the
-      // session is unrecoverable.
-      clearAuth();
-      notifyExpired();
-      return false;
-    } catch {
-      clearAuth();
-      notifyExpired();
-      return false;
-    }
-  }, [refreshAsync, queryClient, applyToken, clearAuth]);
-
-  const refresh = useCallback((): Promise<boolean> => {
-    if (inFlight.current) return inFlight.current;
-    const pending = doRefresh().finally(() => {
-      inFlight.current = null;
-    });
-    inFlight.current = pending;
-    return pending;
-  }, [doRefresh]);
-
-  // --- login / logout ------------------------------------------------------
   const login = useCallback(
     async (email: string, password: string): Promise<void> => {
       const res = await loginAsync({ data: { email, password } });
       if (res.status !== 200) {
         throw new ApiError(res.status, isErrorEnvelope(res.data) ? res.data : undefined);
       }
-      applyToken(res.data.access_token);
+      // The response body carries no token to apply (see `TokenResponse`'s
+      // own docstring: in session mode both fields are `""`) -- the backend
+      // set the session cookie already. Refetch /auth/me to load the
+      // principal, and invalidate every other cached query so nothing from
+      // a PRIOR identity in this tab (a different account that was logged
+      // out, or nothing at all) leaks into the freshly-authenticated one.
+      await queryClient.invalidateQueries();
     },
-    [loginAsync, applyToken],
+    [loginAsync, queryClient],
   );
 
   const logout = useCallback(async (): Promise<void> => {
     try {
-      await logoutAsync({ data: { refresh_token: "" } });
+      // No BODY -- a session client has no refresh token to send, and the
+      // generated hook's `data` field is optional for exactly this reason
+      // (see `RefreshRequest`'s own docstring). The mutation call itself
+      // still takes an (empty) variables object -- `mutateAsync` always
+      // expects one, whether or not any of its fields are required.
+      await logoutAsync({});
     } finally {
-      clearAuth();
       queryClient.clear();
     }
-  }, [logoutAsync, clearAuth, queryClient]);
+  }, [logoutAsync, queryClient]);
 
-  const hasRole = useCallback((role: string): boolean => claims.roles.includes(role), [claims]);
+  const hasRole = useCallback(
+    // `roles` is an optional field on the wire (see `PrincipalOut`'s own
+    // docstring: it defaults to `[]` server-side, which OpenAPI represents
+    // as an optional property rather than a required-but-possibly-empty
+    // array) -- the `?? []` here is that default, applied client-side.
+    (role: string): boolean => (principal?.roles ?? []).includes(role),
+    [principal],
+  );
 
-  // --- bridge registration -------------------------------------------------
+  // A 401 from ANY request -- not just /auth/me's own refetch -- means the
+  // session died server-side: logged out in another tab, idle-expired, or
+  // revoked (a password reset, an admin ban). There is no refresh to
+  // attempt on this path (see `authBridge.ts`'s own docstring on why session
+  // mode drops that machinery entirely) -- the only correct reaction is to
+  // clear the cached principal and let the app react.
   useEffect(() => {
-    setRefreshHandler(refresh);
-    return () => {
-      clearRefreshHandler();
-    };
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!onAuthExpired) return;
-    return addExpiredListener(onAuthExpired);
-  }, [onAuthExpired]);
+    return addExpiredListener(() => {
+      queryClient.setQueryData(getMeAuthMeGetQueryKey(), undefined);
+      void queryClient.invalidateQueries({ queryKey: getMeAuthMeGetQueryKey() });
+      onAuthExpired?.();
+    });
+  }, [queryClient, onAuthExpired]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      isAuthenticated: accessToken !== null,
-      claims,
+      isAuthenticated: principal !== null,
       principal,
-      isPending: loginPending || refreshPending || logoutPending,
+      isPending: loginPending || logoutPending || meQuery.isLoading,
       login,
       logout,
-      refresh,
       hasRole,
     }),
-    [
-      accessToken,
-      claims,
-      principal,
-      loginPending,
-      refreshPending,
-      logoutPending,
-      login,
-      logout,
-      refresh,
-      hasRole,
-    ],
+    [principal, loginPending, logoutPending, meQuery.isLoading, login, logout, hasRole],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

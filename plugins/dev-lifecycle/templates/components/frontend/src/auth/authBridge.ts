@@ -1,72 +1,46 @@
-// The narrow, module-scoped channel between the in-memory auth state (owned by
-// AuthProvider — see auth/AuthProvider) and the two consumers that must reach
-// it WITHOUT a React context:
-//   1. the api-client mutator's access-token getter (`configureApiClient({
-//      getAccessToken })`), which runs outside React entirely; and
-//   2. the QueryClient's `onError` refresh trigger (query/createQueryClient),
-//      which fires from the cache, not a component.
+// The narrow, module-scoped channel between the data layer (createQueryClient,
+// which reacts to a 401 from the cache, not a component) and the auth layer
+// (AuthProvider, which owns the `/auth/me` query and the app's `onAuthExpired`
+// callback). Module-scoped mutable state is safe here because the only thing
+// it carries is a set of listener functions, never data — see
+// `notifySessionInvalidated`'s own doc comment.
 //
-// Module-scoped mutable state is safe here precisely because this state is
-// browser-in-memory and CLIENT-ONLY: the access token is never persisted and
-// never set during a server render, so on the server `getAccessToken()`
-// returns null and nothing is injected. Only `getAccessToken` is a public
-// export (the app wires it into `configureApiClient`); everything else is
-// internal to @repo/web-shared and consumed by createQueryClient / AuthProvider.
+// Session mode holds NO in-memory token (see `AuthProvider`'s own docstring
+// on why: the credential is an `HttpOnly` cookie JS cannot read), so there is
+// nothing here for the api-client mutator's `getAccessToken` to read and no
+// refresh step to trigger — both of which an earlier, bearer/cookie-JWT-mode
+// version of this file carried. What remains is strictly smaller: one event,
+// "the session this tab thought it had just turned out to be dead."
 
-let accessToken: string | null = null;
-let refreshHandler: () => Promise<boolean> = async () => false;
-const expiredListeners = new Set<() => void>();
+const invalidatedListeners = new Set<() => void>();
 
 /**
- * The getter the app passes to `configureApiClient({ getAccessToken })` so the
- * in-memory access token rides every generated request as a Bearer header.
- * Returns null when logged out (or on a server render). PUBLIC.
+ * @internal The QueryClient's `onError` (see `createQueryClient.ts`) calls
+ * this on a 401 `ApiError` from ANY query or mutation — not just `/auth/me`'s
+ * own. There is no refresh step to attempt on the session path (unlike the
+ * JWT paths this replaced): a 401 here always means the session is already
+ * gone — logged out in another tab, idle-expired, or server-revoked — so the
+ * only correct reaction is to notify, never to retry.
  */
-export const getAccessToken = (): string | null => accessToken;
-
-/** @internal AuthProvider writes the current in-memory access token here. */
-export const setAccessToken = (token: string | null): void => {
-  accessToken = token;
-};
-
-/** @internal AuthProvider registers its single-flight `refresh` here on mount. */
-export const setRefreshHandler = (fn: () => Promise<boolean>): void => {
-  refreshHandler = fn;
-};
-
-/** @internal AuthProvider clears its handler on unmount (back to a no-op). */
-export const clearRefreshHandler = (): void => {
-  refreshHandler = async () => false;
+export const notifySessionInvalidated = (): void => {
+  for (const fn of invalidatedListeners) fn();
 };
 
 /**
- * @internal The QueryClient's `onError` calls this on a 401 to drive a single
- * refresh. Resolves `true` if the token was rotated, `false` if auth is
- * unrecoverable (the handler itself clears memory + notifies expiry first).
- */
-export const requestRefresh = (): Promise<boolean> => refreshHandler();
-
-/**
- * @internal Register an expiry listener; returns an unsubscribe fn. Used by
- * BOTH AuthProvider (its `onAuthExpired` prop) and createQueryClient (its
- * `onAuthExpired` option), so every registered hook fires when a refresh
- * ultimately fails — they don't compete, they all run.
+ * @internal Register a session-invalidated listener; returns an unsubscribe
+ * fn. Used by BOTH `AuthProvider` (to clear its `/auth/me` query and fire the
+ * app's own `onAuthExpired` prop) and `createQueryClient` (its own
+ * `onAuthExpired` option), so every registered hook fires — they don't
+ * compete, they all run.
  */
 export const addExpiredListener = (fn: () => void): (() => void) => {
-  expiredListeners.add(fn);
+  invalidatedListeners.add(fn);
   return () => {
-    expiredListeners.delete(fn);
+    invalidatedListeners.delete(fn);
   };
-};
-
-/** @internal AuthProvider calls this after clearing memory on a failed refresh. */
-export const notifyExpired = (): void => {
-  for (const fn of expiredListeners) fn();
 };
 
 /** @internal Test-only: reset all module state so cases don't leak into one another. */
 export const __resetAuthBridge = (): void => {
-  accessToken = null;
-  refreshHandler = async () => false;
-  expiredListeners.clear();
+  invalidatedListeners.clear();
 };

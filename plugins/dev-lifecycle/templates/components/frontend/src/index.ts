@@ -20,8 +20,10 @@ export { decodeAccessTokenClaims } from "./jwt/decodeAccessTokenClaims";
 export type { AccessTokenClaims } from "./jwt/decodeAccessTokenClaims";
 
 // --- auth -----------------------------------------------------------------
-// `getAccessToken` is the getter the app wires into `configureApiClient`.
-export { getAccessToken } from "./auth/authBridge";
+// No token getter to export: session mode (this provider's only mode —
+// see AuthProvider's own docstring) holds no token, so there is nothing for
+// `configureApiClient`'s `getAccessToken` to read. Pair this provider with
+// `configureApiClient({ mode: "session" })`.
 export { AuthProvider } from "./auth/AuthProvider";
 export type { AuthProviderProps } from "./auth/AuthProvider";
 export { useAuth } from "./auth/useAuth";

@@ -258,7 +258,7 @@ export const getCreateAdminBlogPostAdminBlogPostsPostUrl = () => {
  * that case, see this module's own `_unique_slug` docstring.
  *
  * The creating admin becomes the post's `author_id` — this stage has no
- * separate "assign an author" concept; `claims.sub` (the access token's
+ * separate "assign an author" concept; `principal.sub` (the access token's
  * own `sub` claim) is already a user id string, parsed straight to
  * `uuid.UUID`.
  * @summary Create blog post (admin)
