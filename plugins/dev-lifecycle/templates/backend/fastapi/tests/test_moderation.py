@@ -69,7 +69,7 @@ async def _seed_verified_admin(email: str, password: str) -> str:
 
 
 def _login(client: TestClient, email: str, password: str) -> dict:
-    response = client.post("/auth/login", json={"email": email, "password": password})
+    response = client.post("/auth/login", json={"email": email, "password": password}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -418,7 +418,7 @@ def test_resolve_ban_author_bans_a_comment_author_and_revokes_sessions(
     headers = _admin_headers(auth_client)
     post = _create_post(auth_client, headers)
     author = _register_and_verify(auth_client, email_sender, email="commenter@example.com", password=_PASSWORD)
-    login = auth_client.post("/auth/login", json={"email": "commenter@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "commenter@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 200, login.text
     refresh_token = login.json()["refresh_token"]
 

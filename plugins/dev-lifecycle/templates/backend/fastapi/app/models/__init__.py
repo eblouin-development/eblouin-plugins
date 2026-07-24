@@ -19,7 +19,18 @@ from app.models.flag import Flag  # noqa: F401
 from app.models.item import Item  # noqa: F401
 from app.models.login_attempt import LoginAttempt  # noqa: F401
 from app.models.refresh_token import RefreshToken  # noqa: F401
+from app.models.session import Session  # noqa: F401
 from app.models.single_use_token import SingleUseToken  # noqa: F401
 from app.models.user import User  # noqa: F401
 
-__all__ = ["BlogPost", "Comment", "Flag", "Item", "LoginAttempt", "RefreshToken", "SingleUseToken", "User"]
+__all__ = [
+    "BlogPost",
+    "Comment",
+    "Flag",
+    "Item",
+    "LoginAttempt",
+    "RefreshToken",
+    "Session",
+    "SingleUseToken",
+    "User",
+]

@@ -162,8 +162,15 @@ def test_cookie_login_sets_expected_cookie_flags_and_empty_refresh_in_body(
 def test_bearer_login_unchanged_real_refresh_token_and_no_set_cookie(
     auth_client: TestClient, email_sender: _CapturingEmailSender
 ) -> None:
+    """Bearer mode is now opted into EXPLICITLY (`X-Auth-Mode: bearer`) --
+    server-side sessions are the default. Everything about the bearer
+    response itself is unchanged: real tokens in the body, no cookies."""
     _register_and_verify(auth_client, email_sender)
-    response = auth_client.post(f"{_BASE}/auth/login", json={"email": _EMAIL, "password": _PASSWORD})
+    response = auth_client.post(
+        f"{_BASE}/auth/login",
+        json={"email": _EMAIL, "password": _PASSWORD},
+        headers={"X-Auth-Mode": "bearer"},
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["refresh_token"] != ""
@@ -171,21 +178,28 @@ def test_bearer_login_unchanged_real_refresh_token_and_no_set_cookie(
     assert "set-cookie" not in {name.lower() for name in response.headers.keys()}
 
 
-def test_login_with_a_non_cookie_x_auth_mode_value_is_still_bearer_mode(
+def test_login_with_an_unrecognized_x_auth_mode_value_falls_to_session_mode(
     auth_client: TestClient, email_sender: _CapturingEmailSender
 ) -> None:
-    """Locked design: "Default (absent/other) = bearer" — an `X-Auth-Mode`
-    header present but NOT the exact string `"cookie"` must not switch
-    modes either."""
+    """An `X-Auth-Mode` header that is present but matches none of the
+    three known values falls to SESSION mode — the default, and the safer
+    direction for an unrecognized value to fall: the caller gets the
+    revocable credential rather than a long-lived token it did not
+    successfully ask for."""
     _register_and_verify(auth_client, email_sender)
     response = auth_client.post(
         f"{_BASE}/auth/login",
         json={"email": _EMAIL, "password": _PASSWORD},
-        headers={"X-Auth-Mode": "mobile"},
+        headers={"X-Auth-Mode": "banana"},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["refresh_token"] != ""
-    assert "set-cookie" not in {name.lower() for name in response.headers.keys()}
+    body = response.json()
+    assert body["token_type"] == "session"
+    # No token of any kind handed to the client -- the credential is the
+    # HttpOnly session cookie, which is the entire point.
+    assert body["refresh_token"] == ""
+    assert body["access_token"] == ""
+    assert "session_id" in response.cookies
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +314,11 @@ def test_bearer_refresh_without_csrf_header_still_succeeds(
     auth_client: TestClient, email_sender: _CapturingEmailSender
 ) -> None:
     _register_and_verify(auth_client, email_sender)
-    login = auth_client.post(f"{_BASE}/auth/login", json={"email": _EMAIL, "password": _PASSWORD})
+    login = auth_client.post(
+        f"{_BASE}/auth/login",
+        json={"email": _EMAIL, "password": _PASSWORD},
+        headers={"X-Auth-Mode": "bearer"},
+    )
     refresh_token = login.json()["refresh_token"]
     assert refresh_token
 

@@ -8,8 +8,9 @@ below for the full, load-bearing order.
 
 --- Security composition (Stage 3 #26, Step 3b) ------------------------
 Four of the six vendored `app/core/security/` components are wired here as
-middleware; the other two (secret_store, input_validation) are library
-code composed at the point of use, not middleware (see app/core/config.py's
+middleware, plus this app's own `SessionCsrfMiddleware`; the other two
+(secret_store, input_validation) are library code composed at the point of
+use, not middleware (see app/core/config.py's
 `jwt_signing_key` for secret_store's composition; app/schemas/item.py's
 docstring for why input_validation's StrictModel isn't adopted there).
 `webhook_signature` and `idempotency` (also in the component catalog) are
@@ -28,7 +29,7 @@ The practical consequence: the LAST `add_middleware()`/`add_cors()`/
 `add_security_headers()` call in `create_app()` below ends up OUTERMOST at
 runtime. The calls in this factory are therefore ordered bottom-to-top
 relative to the prose here -- read the code comments at each call site for
-the "call N of 4" position.**
+the "call N of 5" position.**
 
 1. **security-headers (OUTERMOST of the `add_middleware()` stack).** Runs
    first on the way in and, more importantly, LAST on the way out -- it
@@ -56,15 +57,22 @@ the "call N of 4" position.**
    request already carries it, without threading it through every call
    site by hand -- exactly the seam audit_logging/README.md's "Request-id
    binding (for Step 3 middleware)" section documents.
-3. **rate-limiting.** Pre-auth (this app has no real authentication yet --
-   Stage 5, #28 -- so "pre-auth" and "for every request" are the same
-   thing today), general per-client-IP ceiling. Runs INSIDE request-id
-   binding (so a 429 still carries the request id) and OUTSIDE CORS (so an
+3. **session CSRF (`app/api/middleware/csrf.py`).** Enforces the
+   double-submit check on every unsafe-method request that actually
+   carries a `session_id` cookie -- the obligation session mode's `Path=/`
+   cookie creates, since EVERY state-changing route (not just `/auth/*`)
+   is then a CSRF target. Runs INSIDE request-id binding, so a 403 still
+   carries a traceable request id, and OUTSIDE rate limiting, so a forged
+   cross-site request cannot burn a victim's token bucket on its way to
+   being rejected. See that module's own docstring for why this is
+   middleware rather than a per-route call.
+4. **rate-limiting.** General per-client-IP ceiling, applied to every
+   request. Runs INSIDE the CSRF check above and OUTSIDE CORS (so an
    attacker can't burn through the rate-limit budget with cross-origin
    preflight `OPTIONS` requests that never even reach CORS's own allow/deny
    decision -- rate limiting sees and counts every request regardless of
    origin).
-4. **CORS (INNERMOST of the four).** Closest to routing/exception
+5. **CORS (INNERMOST of the five).** Closest to routing/exception
    handling. Deny-by-default: wired only when `cors_allowed_origins` is
    non-empty -- see the call site's own comment for why an empty list means
    "skip CORS entirely" rather than constructing a policy that would fail.
@@ -83,6 +91,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter
 
+from app.api.middleware import SessionCsrfMiddleware
 from app.api.routers import admin, auth, blog, blog_public, health, items, moderation
 from app.core.config import Settings, get_settings
 from app.core.db import configure_engine
@@ -440,7 +449,7 @@ def create_app(*, lifespan_ctx=lifespan, settings: Settings | None = None) -> Fa
     # the module docstring's outermost-to-innermost prose order, because
     # that's what actually produces that runtime order.
 
-    # Call 1 of 4 (innermost): CORS. Deny-by-default: `CORSPolicy.__init__`
+    # Call 1 of 5 (innermost): CORS. Deny-by-default: `CORSPolicy.__init__`
     # itself refuses to construct with an empty `allow_origins` (see
     # cors_lockdown/_core.py's InsecureCORSPolicyError) — there is no
     # "allow nothing" policy object to build. Treating "no origins
@@ -485,7 +494,7 @@ def create_app(*, lifespan_ctx=lifespan, settings: Settings | None = None) -> Fa
             )
         add_cors(app, policy)
 
-    # Call 2 of 4: rate limiting. One InMemoryBucketStore per app instance
+    # Call 2 of 5: rate limiting. One InMemoryBucketStore per app instance
     # (per-process, per rate_limiting/_core.py's own documented limitation —
     # see that file's "Judgment calls" for the multi-worker/multi-replica
     # caveat; Stage 11 swaps in a Redis-backed BucketStore for a true shared
@@ -519,12 +528,31 @@ def create_app(*, lifespan_ctx=lifespan, settings: Settings | None = None) -> Fa
         trusted_hops=resolved_settings.rate_limit_trusted_hops,
     )
 
-    # Call 3 of 4: request-id / audit binding. See audit_logging/
+    # Call 3 of 5: session-mode CSRF. Added just OUTSIDE rate limiting and
+    # just INSIDE request-id binding, deliberately:
+    #
+    # - Outside rate limiting means a request that fails the double-submit
+    #   check is rejected 403 without consuming a token bucket. A forged
+    #   cross-site request should not be able to exhaust a victim's rate
+    #   limit as a side effect of being rejected.
+    # - Inside request-id binding means a CSRF rejection still carries an
+    #   `x-request-id` and still lands in the audit log with a correlatable
+    #   id — a 403 nobody can trace back to a request is a 403 nobody can
+    #   investigate.
+    #
+    # This is the enforcement point for the obligation session mode's
+    # `Path=/` cookie creates: EVERY unsafe-method route is a CSRF target,
+    # not just `/auth/*`. See app/api/middleware/csrf.py's own module
+    # docstring for why that is a middleware rather than a per-route call,
+    # and app/core/security/auth/_cookies.py's for the mechanism itself.
+    app.add_middleware(SessionCsrfMiddleware)
+
+    # Call 4 of 5: request-id / audit binding. See audit_logging/
     # middleware.py's own docstring for the binding mechanics and the
     # client-supplied-X-Request-ID trust posture.
     app.add_middleware(RequestIDMiddleware)
 
-    # Call 4 of 4 (outermost): security headers. Added LAST so it wraps
+    # Call 5 of 5 (outermost): security headers. Added LAST so it wraps
     # every other middleware and the router — see the module docstring's
     # point 1 for why that ordering specifically matters (it must see, and
     # be able to overwrite headers on, every response any lower layer

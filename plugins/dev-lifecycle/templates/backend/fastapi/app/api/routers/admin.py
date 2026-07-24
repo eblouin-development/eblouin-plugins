@@ -3,7 +3,7 @@
 "admin")`, from the vendored auth component's `fastapi.py`). Demonstrates
 the role-gating machinery end to end, with no new auth logic of its own:
 
-- **200** for an authenticated principal whose `AccessClaims.roles`
+- **200** for an authenticated principal whose `SessionPrincipal.roles`
   includes `"admin"`.
 - **403** `permission_denied` for an authenticated principal WITHOUT the
   `"admin"` role -- `require_roles`'s dependency raises `InsufficientRole`
@@ -30,8 +30,8 @@ endpoint's own success body is exactly `{"status": "ok"}`, the shape
 
 Every route below is gated the SAME way `admin_ping` is (`Depends(
 require_admin)`, bound as a parameter here rather than in `dependencies=`
-so the resolved `AccessClaims` is available in the handler body too --
-`claims.sub` is the acting admin's own id, used both as the audit actor and
+so the resolved `SessionPrincipal` is available in the handler body too --
+`principal.sub` is the acting admin's own id, used both as the audit actor and
 for the self-protection guard, below), PLUS a second, TIGHTER per-route
 rate limit (`require_admin_rate_limit`, this module's own `InMemoryBucketStore`
 -- see that dependency's own comment) layered on top of the general per-IP
@@ -44,7 +44,7 @@ is audited via the vendored audit-logging component's `audit_event(...)`
 (`app/core/security/audit_logging/audit.py`, called directly here -- it's a
 plain synchronous function, no `AuthEventSink`/`await` indirection needed
 the way `app/core/security/auth/stores.py`'s `AuditAuthEventSink` wraps it
-for the auth core) -- `actor=claims.sub`, `resource=f"user:{user.id}"`
+for the auth core) -- `actor=principal.sub`, `resource=f"user:{user.id}"`
 (a `type:id` identifier, never the user's email), `outcome="success"`, and
 `changed_fields=[...]` naming which column(s) changed -- NEVER the raw
 before/after values themselves (a status/role-list change is not sensitive
@@ -90,7 +90,7 @@ from app.core.config import get_settings
 from app.core.db import AsyncRepository, Page, PageParams, get_db
 from app.core.errors import ConflictError, ErrorDetail, ErrorEnvelope, NotFoundError, ValidationFailedError
 from app.core.security.audit_logging.audit import audit_event
-from app.core.security.auth import AccessClaims
+from app.core.security.auth import SessionPrincipal
 from app.core.security.auth.stores import SqlAlchemyRefreshTokenStore, utc_now
 from app.core.security.rate_limiting import InMemoryBucketStore, make_rate_limit_dependency
 from app.models.user import User
@@ -195,12 +195,12 @@ def _to_admin_user_out(user: User) -> AdminUserOut:
     return AdminUserOut.model_validate(user)
 
 
-def _ensure_not_self(claims: AccessClaims, user_id: uuid.UUID, *, action: str) -> None:
+def _ensure_not_self(principal: SessionPrincipal, user_id: uuid.UUID, *, action: str) -> None:
     """Self-protection guard (Stage 13b's plan): the acting admin can never
     `action` (ban/suspend/delete) their OWN account -- comparing
-    `claims.sub` (the access token's `sub` claim, a bare user-id string)
+    `principal.sub` (the session principal's `sub`, a bare user-id string)
     against `str(user_id)` directly, no extra lookup needed."""
-    if str(user_id) == claims.sub:
+    if str(user_id) == principal.sub:
         raise ConflictError(f"An admin cannot {action} their own account.")
 
 
@@ -217,7 +217,7 @@ async def ban_user(db: AsyncSession, user: User) -> User:
 
     Deliberately does NOT perform the self-protection check
     (`_ensure_not_self`) or emit the `admin.user.ban` audit event itself --
-    both callers have their own `claims`/audit-action-name context this
+    both callers have their own `principal`/audit-action-name context this
     function has no business assuming (moderation's own resolve emits
     `admin.flag.resolve`, not `admin.user.ban`, as its audit action -- see
     that router's own docstring), so those two steps stay the CALLER's
@@ -273,7 +273,7 @@ async def list_admin_users(
     params: PageParams = Depends(),
     q: str | None = Query(default=None, min_length=1, description="Case-insensitive substring match against email."),
     status_filter: UserStatus | None = Query(default=None, alias="status"),
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> Page[AdminUserOut]:
@@ -306,7 +306,7 @@ async def list_admin_users(
 )
 async def get_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -326,7 +326,7 @@ async def get_admin_user(
 )
 async def suspend_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -345,14 +345,14 @@ async def suspend_admin_user(
     user = await repo.get(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} was not found.")
-    _ensure_not_self(claims, user.id, action="suspend")
+    _ensure_not_self(principal, user.id, action="suspend")
     if user.status != UserStatus.ACTIVE.value:
         raise ConflictError(f"Cannot suspend a user with status '{user.status}'.")
     user = await repo.update(user, status=UserStatus.SUSPENDED.value)
     await SqlAlchemyRefreshTokenStore(db).revoke_all_for_user(str(user.id))
     audit_event(
         "admin.user.suspend",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user.id}",
         outcome="success",
         changed_fields=["status"],
@@ -369,7 +369,7 @@ async def suspend_admin_user(
 )
 async def ban_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -383,11 +383,11 @@ async def ban_admin_user(
     user = await repo.get(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} was not found.")
-    _ensure_not_self(claims, user.id, action="ban")
+    _ensure_not_self(principal, user.id, action="ban")
     user = await ban_user(db, user)
     audit_event(
         "admin.user.ban",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user.id}",
         outcome="success",
         changed_fields=["status"],
@@ -404,7 +404,7 @@ async def ban_admin_user(
 )
 async def reinstate_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -424,7 +424,7 @@ async def reinstate_admin_user(
     user = await repo.update(user, status=UserStatus.ACTIVE.value)
     audit_event(
         "admin.user.reinstate",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user.id}",
         outcome="success",
         changed_fields=["status"],
@@ -442,7 +442,7 @@ async def reinstate_admin_user(
 async def set_admin_user_roles(
     user_id: uuid.UUID,
     payload: AdminRolesIn,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -466,12 +466,12 @@ async def set_admin_user_roles(
             details=[ErrorDetail(field="roles", message=f"Unknown role: {role!r}") for role in unknown],
         )
     deduped = sorted(set(payload.roles))
-    if str(user_id) == claims.sub and "admin" not in deduped:
+    if str(user_id) == principal.sub and "admin" not in deduped:
         raise ConflictError("An admin cannot remove their own admin role.")
     user = await repo.update(user, roles=deduped)
     audit_event(
         "admin.user.roles_set",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user.id}",
         outcome="success",
         changed_fields=["roles"],
@@ -488,7 +488,7 @@ async def set_admin_user_roles(
 )
 async def force_verify_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> AdminUserOut:
@@ -505,7 +505,7 @@ async def force_verify_admin_user(
         user = await repo.update(user, email_verified=True, verified_at=utc_now())
     audit_event(
         "admin.user.force_verify",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user.id}",
         outcome="success",
         changed_fields=["email_verified"],
@@ -522,7 +522,7 @@ async def force_verify_admin_user(
 )
 async def delete_admin_user(
     user_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> None:
@@ -536,11 +536,11 @@ async def delete_admin_user(
     user = await repo.get(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} was not found.")
-    _ensure_not_self(claims, user.id, action="delete")
+    _ensure_not_self(principal, user.id, action="delete")
     await repo.delete(user)
     audit_event(
         "admin.user.delete",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"user:{user_id}",
         outcome="success",
     )

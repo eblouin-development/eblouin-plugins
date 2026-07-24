@@ -184,7 +184,7 @@ def _register(client: TestClient, email: str = "alice@example.com", password: st
 
 
 def _login(client: TestClient, email: str = "alice@example.com", password: str = "correct horse battery staple") -> dict:
-    response = client.post("/auth/login", json={"email": email, "password": password})
+    response = client.post("/auth/login", json={"email": email, "password": password}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -303,7 +303,7 @@ def test_reregistering_a_soft_deleted_email_returns_409_not_500(auth_client: Tes
 
 
 def test_login_with_unknown_email_returns_401_unauthenticated_envelope(auth_client: TestClient) -> None:
-    response = auth_client.post("/auth/login", json={"email": "nobody@example.com", "password": "whatever"})
+    response = auth_client.post("/auth/login", json={"email": "nobody@example.com", "password": "whatever"}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 401
     body = response.json()
     assert body["error"]["code"] == "unauthenticated"
@@ -311,7 +311,7 @@ def test_login_with_unknown_email_returns_401_unauthenticated_envelope(auth_clie
 
 def test_login_with_wrong_password_returns_401_unauthenticated_envelope(auth_client: TestClient) -> None:
     _register(auth_client)
-    response = auth_client.post("/auth/login", json={"email": "alice@example.com", "password": "wrong password"})
+    response = auth_client.post("/auth/login", json={"email": "alice@example.com", "password": "wrong password"}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 401
     body = response.json()
     assert body["error"]["code"] == "unauthenticated"
@@ -881,7 +881,7 @@ def test_lockout_after_max_failures_locks_out_even_the_correct_password(
     _register_and_verify(client, email_sender)
 
     for _ in range(5):
-        wrong = client.post("/auth/login", json={"email": "alice@example.com", "password": "definitely wrong"})
+        wrong = client.post("/auth/login", json={"email": "alice@example.com", "password": "definitely wrong"}, headers={"X-Auth-Mode": "bearer"})
         assert wrong.status_code == 401
 
     locked_response = client.post(
@@ -906,7 +906,7 @@ def test_reset_password_lifts_lockout_and_new_password_logs_in_immediately(
     _register_and_verify(client, email_sender)
 
     for _ in range(5):
-        wrong = client.post("/auth/login", json={"email": "alice@example.com", "password": "definitely wrong"})
+        wrong = client.post("/auth/login", json={"email": "alice@example.com", "password": "definitely wrong"}, headers={"X-Auth-Mode": "bearer"})
         assert wrong.status_code == 401
 
     # Confirm the account is actually locked -- the correct OLD password

@@ -662,3 +662,76 @@ def test_sessions_module_imports_no_framework(sessions_mod):
     source = inspect.getsource(sessions_mod)
     for forbidden in ("import fastapi", "import django", "import sqlalchemy", "import jwt"):
         assert forbidden not in source
+
+
+# ---------------------------------------------------------------------------
+# The AccountService `sessions=` seam (password reset kills BOTH transports)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_password_reset_revokes_sessions_when_the_seam_is_wired(
+    core_mod,
+    sessions_mod,
+    session_service,
+    user_store,
+    single_use_token_service,
+    email_sender,
+    password_service,
+    refresh_store,
+    clock,
+):
+    # A reset that killed only refresh families would leave the account
+    # HALF-revoked: an attacker's session cookie would keep authenticating.
+    account_service = core_mod.AccountService(
+        user_store,
+        single_use_token_service,
+        email_sender,
+        password_service,
+        refresh_store,
+        clock,
+        sessions=session_service,
+        frontend_base_url="https://app.example.com",
+    )
+    user = await user_store.create("alice@example.com", password_service.hash("old"), ())
+    issued = await session_service.create(user)
+
+    raw = await single_use_token_service.issue(user.id, "reset", timedelta(hours=1))
+    await account_service.reset_password(raw, "a-brand-new-password")
+
+    with pytest.raises(sessions_mod.InvalidSession):
+        await session_service.resolve(issued.session_id)
+
+
+@pytest.mark.asyncio
+async def test_password_reset_leaves_sessions_alone_when_the_seam_is_absent(
+    account_service, session_service, user_store, single_use_token_service, password_service
+):
+    # `sessions=None` (the default) must reproduce the exact prior
+    # behavior, so a project on the JWT path only is unaffected.
+    user = await user_store.create("alice@example.com", password_service.hash("old"), ())
+    issued = await session_service.create(user)
+
+    raw = await single_use_token_service.issue(user.id, "reset", timedelta(hours=1))
+    await account_service.reset_password(raw, "a-brand-new-password")
+
+    assert (await session_service.resolve(issued.session_id)).sub == user.id
+
+
+def test_session_service_satisfies_the_session_revoker_protocol(core_mod, session_service):
+    # Structural, not nominal -- SessionService never imports or subclasses
+    # anything from _core.py's Protocol, which is what keeps _core.py
+    # standalone-importable. Asserted by matching the Protocol's declared
+    # method set against the real object rather than with `isinstance`,
+    # since these Protocols are deliberately not `@runtime_checkable`
+    # (none in this component are).
+    import inspect
+
+    declared = {
+        name
+        for name in vars(core_mod.SessionRevoker)
+        if not name.startswith("_")
+    }
+    assert declared == {"revoke_all_for_user"}
+    for name in declared:
+        assert inspect.iscoroutinefunction(getattr(session_service, name))

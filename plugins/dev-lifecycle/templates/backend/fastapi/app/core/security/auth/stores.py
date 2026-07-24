@@ -54,6 +54,8 @@ from app.core.security.auth import (
     LockoutPolicy,
     PasswordService,
     RefreshRecord,
+    SessionRecord,
+    SessionService,
     SingleUseTokenRecord,
     SingleUseTokenService,
     TokenService,
@@ -61,6 +63,7 @@ from app.core.security.auth import (
 )
 from app.models.login_attempt import LoginAttempt
 from app.models.refresh_token import RefreshToken
+from app.models.session import Session
 from app.models.single_use_token import SingleUseToken
 from app.models.user import User
 
@@ -112,6 +115,24 @@ def _refresh_to_record(row: RefreshToken) -> RefreshRecord:
         issued_at=_as_utc(row.issued_at),
         expires_at=_as_utc(row.expires_at),
         used_at=_as_utc(row.used_at),
+        revoked=row.revoked,
+    )
+
+
+def _session_to_record(row: Session) -> SessionRecord:
+    """Maps a `Session` ORM row onto the vendored component's frozen
+    `SessionRecord`. Every timestamp goes through `_as_utc` for the same
+    reason `_refresh_to_record` does: `SessionService.resolve` compares
+    them against `utc_now()` (an aware datetime), and comparing an aware
+    to a naive datetime raises `TypeError` — which, on this code path,
+    would turn every authenticated request into a 500 the moment a driver
+    or dialect handed back a naive value."""
+    return SessionRecord(
+        session_hash=row.session_hash,
+        user_id=str(row.user_id),
+        created_at=_as_utc(row.created_at),
+        last_seen_at=_as_utc(row.last_seen_at),
+        absolute_expires_at=_as_utc(row.absolute_expires_at),
         revoked=row.revoked,
     )
 
@@ -397,6 +418,105 @@ class SqlAlchemyRefreshTokenStore:
         token happened to be presented). Same commit-not-flush durability
         contract as `add`/`mark_used`/`revoke_family` above."""
         result = await self._session.execute(select(RefreshToken).where(RefreshToken.user_id == uuid.UUID(user_id)))
+        rows = result.scalars().all()
+        for row in rows:
+            row.revoked = True
+        await self._session.flush()
+        await self._session.commit()
+
+
+class SqlAlchemySessionStore:
+    """Implements `_sessions.SessionStore` against `app/models/session.py`'s
+    `Session` and this request's `AsyncSession` — the store behind the
+    DEFAULT browser authentication path in this app.
+
+    **`add`/`touch`/`revoke`/`revoke_all_for_user` each explicitly
+    `commit()`**, not just `flush()`, per `_sessions.SessionStore`'s own
+    protocol docstring, and for a sharper reason than the refresh store's:
+    `SessionService.revoke` is what a logout endpoint's entire security
+    promise rests on, and a revocation still sitting in an uncommitted
+    transaction when the response goes out is a logout that did not
+    happen. Same mid-request-commit posture `SqlAlchemyRefreshTokenStore`
+    documents above — a second `commit()` on an already-clean session at
+    `get_db()`'s end-of-request boundary is a harmless no-op.
+
+    `touch` is the one write on the HOT path (every authenticated request
+    can potentially trigger it), which is exactly why `SessionService`
+    rate-limits it behind `touch_interval` rather than calling it on every
+    resolve — see that service's own docstring. This store does no
+    rate-limiting of its own; it writes whenever it is asked to."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, record: SessionRecord) -> None:
+        row = Session(
+            session_hash=record.session_hash,
+            user_id=uuid.UUID(record.user_id),
+            # `created_at` is passed EXPLICITLY rather than left to the
+            # column's `server_default=func.now()`: the session's own
+            # created_at must come from the SAME injected `now` callable
+            # (`utc_now`) that `SessionService` measures `absolute_ttl`
+            # against, not from the database clock. Letting the two drift
+            # would mean the absolute deadline stored on the row is
+            # computed from a different "now" than the one the row records
+            # as its creation time.
+            created_at=record.created_at,
+            last_seen_at=record.last_seen_at,
+            absolute_expires_at=record.absolute_expires_at,
+            revoked=record.revoked,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.commit()
+
+    async def get_by_hash(self, session_hash: str) -> SessionRecord | None:
+        result = await self._session.execute(select(Session).where(Session.session_hash == session_hash))
+        row = result.scalar_one_or_none()
+        return _session_to_record(row) if row is not None else None
+
+    async def touch(self, session_hash: str, last_seen_at: datetime) -> None:
+        result = await self._session.execute(select(Session).where(Session.session_hash == session_hash))
+        row = result.scalar_one_or_none()
+        if row is None:
+            # `SessionService.resolve` only calls touch() on a row it just
+            # looked up successfully in the same call -- a None here would
+            # mean it vanished mid-request. Silently returning (rather than
+            # raising) matches `SqlAlchemyRefreshTokenStore.mark_used`'s
+            # identical "best-effort write" posture, and is especially
+            # right here: failing a live, already-authenticated request
+            # because a bookkeeping timestamp could not be written would
+            # turn a cosmetic problem into an outage.
+            return
+        row.last_seen_at = last_seen_at
+        await self._session.flush()
+        await self._session.commit()
+
+    async def revoke(self, session_hash: str) -> None:
+        """Marks ONE session revoked. Silently succeeds for an unknown
+        hash — `SessionStore.revoke`'s documented idempotence contract,
+        which `SessionService.revoke` (logout) relies on so a stale or
+        forged cookie never produces an error, and so this endpoint never
+        becomes an oracle distinguishing real session ids from invented
+        ones."""
+        result = await self._session.execute(select(Session).where(Session.session_hash == session_hash))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return
+        row.revoked = True
+        await self._session.flush()
+        await self._session.commit()
+
+    async def revoke_all_for_user(self, user_id: str) -> None:
+        """Revokes EVERY session row belonging to `user_id` — every device,
+        everywhere, at once. Called on a password reset (alongside
+        `SqlAlchemyRefreshTokenStore.revoke_all_for_user`, so BOTH
+        transports die on one reset), on a detected compromise, and on an
+        account deactivation. Effective on the next request against every
+        affected session, which is the guarantee the JWT path can only
+        approximate. Indexed on `sessions.user_id` (see migration 0007), so
+        this is one indexed UPDATE rather than a scan."""
+        result = await self._session.execute(select(Session).where(Session.user_id == uuid.UUID(user_id)))
         rows = result.scalars().all()
         for row in rows:
             row.revoked = True
@@ -872,6 +992,38 @@ def build_lockout_policy(settings: Settings, session: AsyncSession) -> LockoutPo
     )
 
 
+def build_session_service(settings: Settings, session: AsyncSession) -> SessionService:
+    """Builds a per-request `SessionService` — the provider behind this
+    app's DEFAULT browser authentication path, the same composition shape
+    `build_account_service` below and `app/api/deps.py:get_auth_service`
+    use: fresh stores bound to THIS request's `session`, and `utc_now` as
+    the single shared clock every other service in this app's auth
+    composition also uses (so a session's deadlines and a token's expiry
+    are measured against the same "now").
+
+    Takes `SqlAlchemyUserStore` as well as `SqlAlchemySessionStore`
+    because `SessionService.resolve` reads the user's CURRENT roles on
+    every request rather than trusting a snapshot — that second read is
+    what makes a role grant or revocation take effect immediately, and it
+    is the deliberate cost of this path over a JWT's baked-in `roles`
+    claim (see `_sessions.py`'s module docstring).
+
+    **Needs no signing key**, unlike `get_token_service` above — a session
+    id is opaque and unguessable rather than signed, so there is nothing
+    to configure wrong and no `AuthNotConfiguredError` equivalent to fail
+    closed on. That is one fewer secret to manage in every environment for
+    a project that serves only browser clients."""
+    return SessionService(
+        SqlAlchemySessionStore(session),
+        SqlAlchemyUserStore(session),
+        utc_now,
+        idle_ttl=timedelta(seconds=settings.session_idle_ttl_seconds),
+        absolute_ttl=timedelta(seconds=settings.session_absolute_ttl_seconds),
+        touch_interval=timedelta(seconds=settings.session_touch_interval_seconds),
+        events=AuditAuthEventSink(),
+    )
+
+
 def build_account_service(
     settings: Settings,
     session: AsyncSession,
@@ -915,6 +1067,14 @@ def build_account_service(
         now=utc_now,
         events=AuditAuthEventSink(),
         lockout=build_lockout_policy(settings, session),
+        # Both revocation seams are wired, deliberately: `reset_password`
+        # already revoked every refresh-token family, and this makes it
+        # revoke every server-side session too. Wiring only one would leave
+        # a reset account HALF-revoked -- an attacker's session cookie
+        # would keep authenticating despite every JWT being killed. Built
+        # against the SAME `session` as every other store here, so the
+        # revocation commits inside this request like the rest.
+        sessions=build_session_service(settings, session),
         frontend_base_url=settings.frontend_base_url,
         verify_ttl=timedelta(seconds=settings.auth_verify_ttl_seconds),
         reset_ttl=timedelta(seconds=settings.auth_reset_ttl_seconds),

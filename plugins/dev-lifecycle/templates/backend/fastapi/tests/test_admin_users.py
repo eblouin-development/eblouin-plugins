@@ -73,7 +73,7 @@ async def _seed_verified_admin(email: str, password: str) -> str:
 
 
 def _login(client: TestClient, email: str, password: str) -> dict:
-    response = client.post("/auth/login", json={"email": email, "password": password})
+    response = client.post("/auth/login", json={"email": email, "password": password}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -315,7 +315,7 @@ def test_force_verify_happy_path(auth_client: TestClient, email_sender: _Capturi
     assert response.json()["email_verified"] is True
 
     # Now the user can log in without going through /auth/verify-email.
-    login = auth_client.post("/auth/login", json={"email": "mia@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "mia@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 200, login.text
 
 
@@ -390,7 +390,7 @@ def test_suspended_user_cannot_login(auth_client: TestClient, email_sender: _Cap
     suspend = auth_client.post(f"/admin/users/{registered['id']}/suspend", headers=headers)
     assert suspend.status_code == 200, suspend.text
 
-    login = auth_client.post("/auth/login", json={"email": "oscar@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "oscar@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 401, login.text
     assert login.json()["error"]["code"] == "unauthenticated"
 
@@ -401,7 +401,7 @@ def test_banned_user_cannot_login(auth_client: TestClient, email_sender: _Captur
     ban = auth_client.post(f"/admin/users/{registered['id']}/ban", headers=headers)
     assert ban.status_code == 200, ban.text
 
-    login = auth_client.post("/auth/login", json={"email": "paula@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "paula@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 401, login.text
 
 
@@ -410,7 +410,7 @@ def test_active_user_can_still_login(auth_client: TestClient, email_sender: _Cap
     filter isn't rejecting everyone."""
     _register_and_verify(auth_client, email_sender, email="quinn@example.com", password=_PASSWORD)
 
-    login = auth_client.post("/auth/login", json={"email": "quinn@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "quinn@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 200, login.text
 
 
@@ -424,7 +424,7 @@ def test_ban_revokes_existing_refresh_tokens(
     the session; the `status=="active"` filter alone would only stop a
     FUTURE login/refresh lookup, not a session already in flight."""
     registered = _register_and_verify(auth_client, email_sender, email="rosa@example.com", password=_PASSWORD)
-    login = auth_client.post("/auth/login", json={"email": "rosa@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "rosa@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 200, login.text
     refresh_token = login.json()["refresh_token"]
 
@@ -440,7 +440,7 @@ def test_suspend_revokes_existing_refresh_tokens(
     auth_client: TestClient, email_sender: _CapturingEmailSender
 ) -> None:
     registered = _register_and_verify(auth_client, email_sender, email="sam@example.com", password=_PASSWORD)
-    login = auth_client.post("/auth/login", json={"email": "sam@example.com", "password": _PASSWORD})
+    login = auth_client.post("/auth/login", json={"email": "sam@example.com", "password": _PASSWORD}, headers={"X-Auth-Mode": "bearer"})
     assert login.status_code == 200, login.text
     refresh_token = login.json()["refresh_token"]
 

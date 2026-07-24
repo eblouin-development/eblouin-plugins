@@ -1,6 +1,6 @@
-"""Package seam for the vendored auth component (`_core.py`, `_cookies.py`,
-`fastapi.py` — vendored from templates/components/security/auth/, see each
-file's own header note). Same relative-import composition pattern as
+"""Package seam for the vendored auth component (`_core.py`, `_sessions.py`,
+`_cookies.py`, `fastapi.py` — vendored from templates/components/security/auth/,
+see each file's own header note). Same relative-import composition pattern as
 security_headers/__init__.py and rate_limiting/__init__.py — see either
 file's docstring.
 
@@ -8,7 +8,8 @@ Re-exports the names the rest of this app needs so callers write
 `from app.core.security.auth import AuthService, AccessClaims,
 build_get_current_principal` instead of reaching into the individual
 vendored files. The SQLAlchemy-backed `UserStore`/`RefreshTokenStore`
-implementations and the per-request `AuthService` provider are NOT part of
+implementations and the per-request `AuthService`/`SessionService`
+providers are NOT part of
 this package — those import `app.models` (a DB-layer, app-specific
 concern), so they live in `app/core/security/auth/stores.py`, which is
 this app's own code, not a vendored file (see that module's own docstring
@@ -37,6 +38,7 @@ from ._core import (
     RefreshClaims,
     RefreshRecord,
     RefreshTokenStore,
+    SessionRevoker,
     SingleUseTokenRecord,
     SingleUseTokenService,
     SingleUseTokenStore,
@@ -50,24 +52,45 @@ from ._core import (
 from ._cookies import (
     CSRF_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
+    REFRESH_COOKIE_PATH,
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_PATH,
     CsrfValidationError,
     build_csrf_cookie_kwargs,
     build_refresh_cookie_kwargs,
+    build_session_cookie_kwargs,
+    build_session_csrf_cookie_kwargs,
     clear_csrf_cookie_kwargs,
     clear_refresh_cookie_kwargs,
+    clear_session_cookie_kwargs,
+    clear_session_csrf_cookie_kwargs,
     generate_csrf_token,
     verify_double_submit,
+)
+from ._sessions import (
+    InvalidSession,
+    IssuedSession,
+    SessionPrincipal,
+    SessionRecord,
+    SessionService,
+    SessionStore,
+    generate_session_id,
 )
 from .fastapi import (
     AUTH_ERROR_HTTP,
     InsufficientRole,
     bearer_scheme,
     build_get_current_principal,
+    build_get_current_principal_either,
+    build_get_current_session_principal,
     clear_auth_cookies,
+    clear_session_cookies,
     enforce_csrf,
     read_refresh_cookie,
+    read_session_cookie,
     require_roles,
     set_auth_cookies,
+    set_session_cookies,
 )
 
 __all__ = [
@@ -90,6 +113,7 @@ __all__ = [
     "RefreshClaims",
     "RefreshRecord",
     "RefreshTokenStore",
+    "SessionRevoker",
     "SingleUseTokenRecord",
     "SingleUseTokenService",
     "SingleUseTokenStore",
@@ -101,20 +125,39 @@ __all__ = [
     "hash_token",
     "CSRF_COOKIE_NAME",
     "REFRESH_COOKIE_NAME",
+    "REFRESH_COOKIE_PATH",
+    "SESSION_COOKIE_NAME",
+    "SESSION_COOKIE_PATH",
     "CsrfValidationError",
     "build_csrf_cookie_kwargs",
     "build_refresh_cookie_kwargs",
+    "build_session_cookie_kwargs",
+    "build_session_csrf_cookie_kwargs",
     "clear_csrf_cookie_kwargs",
     "clear_refresh_cookie_kwargs",
+    "clear_session_cookie_kwargs",
+    "clear_session_csrf_cookie_kwargs",
     "generate_csrf_token",
     "verify_double_submit",
+    "InvalidSession",
+    "IssuedSession",
+    "SessionPrincipal",
+    "SessionRecord",
+    "SessionService",
+    "SessionStore",
+    "generate_session_id",
     "AUTH_ERROR_HTTP",
     "InsufficientRole",
     "bearer_scheme",
     "build_get_current_principal",
+    "build_get_current_principal_either",
+    "build_get_current_session_principal",
     "clear_auth_cookies",
+    "clear_session_cookies",
     "enforce_csrf",
     "read_refresh_cookie",
+    "read_session_cookie",
     "require_roles",
     "set_auth_cookies",
+    "set_session_cookies",
 ]

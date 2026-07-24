@@ -169,6 +169,68 @@ def build_get_current_session_principal(
     return get_current_session_principal
 
 
+def build_get_current_principal_either(
+    get_session_service: Callable[..., Any],
+    get_auth_service: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Returns a FastAPI dependency that authenticates a request by
+    **whichever credential it actually carries** — the `session_id` cookie
+    if present, otherwise an `Authorization: Bearer` token — returning a
+    `_sessions.SessionPrincipal` or a `_core.AccessClaims` respectively.
+    This is what a route mounts when it must serve BOTH a browser (session,
+    the default) and a native/mobile client (bearer) at the same URL.
+
+    **This is not "let the client pick its own auth".** The decision is
+    made from what is present on THIS request, never from anything the
+    client asserts about itself — the same rule `_cookies.py`'s transport
+    and a project's own `/auth/logout` already follow, and the reason
+    `references/wiring/auth-end-to-end.md` rules out inferring transport
+    from `User-Agent` or a self-declared header. A forged or absent cookie
+    cannot claim the session path, and a browser holding a real session
+    cookie cannot be talked onto the bearer path by an attacker-supplied
+    header.
+
+    **Session is checked FIRST, and that ordering is load-bearing.** If
+    bearer were checked first, a request carrying both a live session
+    cookie and an attacker-supplied `Authorization` header would
+    authenticate as the attacker's token while the browser's own session
+    sat unused — a request the victim's browser can be made to send (the
+    cookie rides along automatically) with a header an attacker controls.
+    Checking the cookie first means the ambient credential wins whenever
+    one exists, so that confusion has no path.
+
+    Because the session path is the one that can carry an ambient
+    credential, a route using this dependency still needs CSRF enforcement
+    on unsafe methods exactly as a session-only route does — see
+    `enforce_csrf` below. A request that authenticated via bearer has no
+    session cookie and is skipped by that check automatically.
+
+    A request with NEITHER credential raises `_sessions.InvalidSession`
+    (from `resolve`, which treats a missing cookie as just another invalid
+    session) — a 401 `unauthenticated`, the same shape either path's own
+    failure produces, so "no credentials at all" is never distinguishable
+    from "bad credentials"."""
+
+    async def get_current_principal_either(
+        request: Request,
+        session_service: Any = Depends(get_session_service),
+        auth_service: Any = Depends(get_auth_service),
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    ) -> Any:
+        session_id = read_session_cookie(request)
+        if session_id is not None:
+            return await session_service.resolve(session_id)
+        if credentials is not None:
+            return await auth_service.resolve_access(credentials.credentials)
+        # Neither credential. Deliberately routed through the SESSION
+        # rejection rather than the bearer one so an unauthenticated
+        # request gets the default path's error, and so the
+        # `auth.session.rejected` audit event fires from one place.
+        return await session_service.resolve(None)
+
+    return get_current_principal_either
+
+
 # ---------------------------------------------------------------------------
 # Bearer/JWT path (native + mobile clients, service-to-service)
 # ---------------------------------------------------------------------------

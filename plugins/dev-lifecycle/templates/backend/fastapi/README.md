@@ -34,6 +34,7 @@ scope here, marked as a `TODO` comment at its seam (see app/main.py).
 - Security composition
 - App layout
 - Error contract
+- Sessions (the default auth path)
 - Auth (Stage 5a, #41)
 - Pagination
 - Database & migrations
@@ -396,6 +397,116 @@ on `app/api/routers/items.py`'s three ID-addressed routes), since only
 those routes can actually 404. This fixup runs identically whether the
 schema is served live at `/openapi.json` or exported via this script — both
 paths call the same `app.openapi()`.
+
+## Sessions (the default auth path)
+
+**A browser client authenticating against this block gets a server-side
+session, not a JWT.** `POST /auth/login` issues an opaque session id in an
+`HttpOnly; Secure; SameSite=Lax; Path=/` `session_id` cookie unless the
+caller explicitly asks for another transport, and every protected route
+resolves that cookie via `app/api/deps.py`'s `get_current_principal`. The
+JWT paths below remain fully wired for native/mobile clients and
+service-to-service callers — this is a default, not a deprecation.
+
+### Why
+
+A JWT is valid because it says it is: between mint and expiry the server
+has no say. That is the right trade for a stateless service call and the
+wrong one for a browser session, where logout, bans, and privilege
+revocation need to take effect *now*. Concretely, on this block:
+
+| | Session (default) | JWT access token |
+| --- | --- | --- |
+| Logout takes effect | next request | when the access TTL elapses |
+| Role revoked | next request (roles read live from `users`) | when the token expires |
+| Account deleted | next request | when the token expires |
+| Idle timeout | enforced (`session_idle_ttl_seconds`) | not expressible |
+| What the browser holds | an opaque id JS cannot read | a readable token |
+| Secret to configure | none | `JWT_SIGNING_KEY` |
+
+The cost is one indexed `sessions` lookup plus one `users` lookup per
+authenticated request. The full argument is in the vendored
+`app/core/security/auth/_sessions.py`'s module docstring.
+
+### Wiring
+
+- **`app/models/session.py`** → the `sessions` table (migration `0007`).
+  Stores the SHA-256 hash of the session id, never the id; no roles
+  column, deliberately.
+- **`app/core/security/auth/stores.py`** → `SqlAlchemySessionStore`
+  (`add`/`get_by_hash`/`touch`/`revoke`/`revoke_all_for_user`, each
+  committed before returning) and `build_session_service`.
+- **`app/api/deps.py`** → `get_session_service`, and the three principals:
+  `get_current_principal` (session first, bearer fallback — what every
+  protected route uses), `get_session_principal` (session only),
+  `get_bearer_principal` (bearer only). `require_admin` is built on the
+  default and works against either credential, because `SessionPrincipal`
+  and `AccessClaims` are duck-type-compatible on `sub`/`roles`.
+- **`app/api/middleware/csrf.py`** → `SessionCsrfMiddleware`, the CSRF
+  enforcement point. See "CSRF" below.
+- **`app/core/config.py`** → `session_idle_ttl_seconds` (12h, sliding),
+  `session_absolute_ttl_seconds` (7d, hard ceiling),
+  `session_touch_interval_seconds` (60s, write-rate bound). A session must
+  be inside BOTH deadlines; nonsensical values are rejected at
+  construction rather than silently serving sessions that never expire.
+
+### Picking a transport
+
+`POST /auth/login` reads `X-Auth-Mode`. It is never inferred from
+`User-Agent` or any other signal, and an unrecognized value falls to the
+default — the safer direction for a mistake to fall.
+
+| `X-Auth-Mode` | Result |
+| --- | --- |
+| absent / `session` / anything unrecognized | **Session cookie** (default). Body: `token_type: "session"`, both token fields `""` — there is deliberately no token for the client to hold. |
+| `bearer` | Access + refresh JWTs in the body. No cookies. |
+| `cookie` | Refresh JWT in a `Path=/auth` cookie, access JWT in the body. Superseded by session mode; kept for a project mid-migration. |
+
+`POST /auth/logout` decides by which credential is actually PRESENT
+(session cookie → refresh cookie → body), so a forged or absent cookie
+cannot claim a path it does not hold. There is **no refresh endpoint on
+the session path**: `resolve` slides the idle deadline forward on every
+authenticated request, so the credential renews itself as a side effect of
+being used, up to the absolute ceiling.
+
+### CSRF
+
+The session cookie is `Path=/`, so **every** unsafe-method route is a CSRF
+target, not just `/auth/*`. `SessionCsrfMiddleware` enforces the
+double-submit check (`X-CSRF-Token` header must equal the `csrf_token`
+cookie, compared in constant time) on every `POST`/`PUT`/`PATCH`/`DELETE`
+that carries a session cookie. A per-route call would eventually be
+forgotten on some new route; a middleware cannot be. It skips safe
+methods, skips requests with no session cookie (a bearer client has no
+ambient credential and must not be asked to echo a token it was never
+given), and exempts exactly `POST /auth/login` (authenticated by its own
+body, and in the middle of replacing the very session whose token it would
+have to echo). Logout is NOT exempt.
+
+The middleware renders its own 403 `ErrorEnvelope` rather than raising,
+because Starlette places registered exception handlers INSIDE the
+middleware stack — see that module's own docstring. It reads the status
+and code from the same `AUTH_ERROR_HTTP` table `app/main.py`'s handler
+uses, so the two cannot drift.
+
+### Revoking everywhere
+
+`AccountService` is wired with BOTH revocation seams
+(`refresh_tokens=` and `sessions=`), so a password reset kills every
+refresh-token family AND every server-side session. Wiring only one would
+leave a reset account half-revoked — an attacker's session cookie would
+keep authenticating despite every JWT being killed. Any new "kill this
+account's access" path must do the same.
+
+### Tests
+
+`tests/test_session_auth.py` (26 tests) covers the path end to end: login
+defaults to session mode and hands the client no token, cookie flags,
+exactly one `sessions` row and NO refresh-token row, a fresh id per login
+(session fixation), logout revoking on the very next request, idempotent
+logout, CSRF enforced on `/auth/*` and on a non-auth route alike, safe
+methods and bearer clients exempt, live role revocation, account deletion,
+password reset killing every session, and both expiry deadlines.
 
 ## Auth (Stage 5a, #41)
 

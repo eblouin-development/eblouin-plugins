@@ -1,14 +1,21 @@
-"""Shared FastAPI dependencies. `get_auth_service` is the Stage 5a (#41)
-per-request `AuthService` provider — binds this request's DB session
-(`get_db`) into fresh `SqlAlchemyUserStore`/`SqlAlchemyRefreshTokenStore`
-instances, plus the process-wide `PasswordService` singleton and a
-`Settings`-derived `TokenService`, into one `AuthService`. `get_current_
-principal` is the vendored auth component's `build_get_current_principal(
-get_auth_service)`, bound once at import time — declares the `HTTPBearer`
-security scheme in OpenAPI (via the component's `bearer_scheme`) and
-resolves a request's bearer token into `_core.AccessClaims` for any route
-that depends on it (`app/api/routers/auth.py`'s `GET /auth/me`, and any
-future protected route).
+"""Shared FastAPI dependencies for both authentication paths.
+
+**`get_current_principal` resolves a SERVER-SIDE SESSION** — the
+`session_id` cookie — and is the DEFAULT every browser-facing protected
+route depends on. It is built from `get_session_service` (a per-request
+`SessionService` over `SqlAlchemySessionStore` + `SqlAlchemyUserStore`).
+`get_bearer_principal` is the JWT/bearer equivalent, kept fully wired for
+native/mobile clients and service-to-service callers; `get_auth_service`
+is still what BOTH paths verify credentials through at login, since
+`AuthService` owns Argon2id verification, the timing defense, lockout, and
+the email-verification gate regardless of what the successful login then
+issues.
+
+`get_auth_service` is the per-request `AuthService` provider — binds this
+request's DB session (`get_db`) into fresh `SqlAlchemyUserStore`/
+`SqlAlchemyRefreshTokenStore` instances, plus the process-wide
+`PasswordService` singleton and a `Settings`-derived `TokenService`, into
+one `AuthService`.
 
 Stage 5c (#45) adds `get_account_service` — the per-request `AccountService`
 provider `app/api/routers/auth.py`'s new verify-email/request-password-reset/
@@ -30,7 +37,10 @@ from app.core.security.auth import (
     AccountService,
     AuthService,
     EmailSender,
+    SessionService,
     build_get_current_principal,
+    build_get_current_principal_either,
+    build_get_current_session_principal,
     require_roles,
 )
 from app.core.security.auth.stores import (
@@ -39,6 +49,7 @@ from app.core.security.auth.stores import (
     SqlAlchemyUserStore,
     build_account_service,
     build_lockout_policy,
+    build_session_service,
     get_password_service,
     get_token_service,
     utc_now,
@@ -139,14 +150,76 @@ async def get_account_service(
     return build_account_service(settings, db, email=email_sender)
 
 
-get_current_principal = build_get_current_principal(get_auth_service)
+async def get_session_service(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> SessionService:
+    """Per-request `SessionService`, bound to THIS request's
+    `AsyncSession` — the provider behind this app's DEFAULT authentication
+    path. Same session-per-request composition shape as
+    `get_auth_service` above; the composition itself lives in
+    `stores.py:build_session_service` (see its own docstring), and
+    `request.app.state.settings` is read for the same reason
+    `get_auth_service` documents rather than `Depends(get_settings)`.
 
-# Stage 5d (#46): the RBAC admin example's gate -- `require_roles(...)` is
-# the vendored component's generic role-AND-set dependency factory
-# (`app/core/security/auth/fastapi.py`), bound here once, the SAME way
-# `get_current_principal` immediately above is bound once against
-# `get_auth_service`. `app/api/routers/admin.py`'s `GET /admin/ping` is the
-# one route that depends on this today; any future admin-only route reuses
-# this SAME dependency rather than calling `require_roles(...)` again at
-# each call site.
+    Unlike `get_auth_service`, this can never raise
+    `AuthNotConfiguredError`: a session id is opaque and unguessable
+    rather than signed, so there is no signing key to be missing and
+    nothing to fail closed on."""
+    settings = request.app.state.settings
+    return build_session_service(settings, db)
+
+
+# THE DEFAULT PRINCIPAL, and what every protected route in this app
+# depends on. Authenticates by whichever credential the request ACTUALLY
+# carries -- the `session_id` cookie first (the default for browsers),
+# falling back to an `Authorization: Bearer` token (native/mobile,
+# service-to-service). One dependency serves both transports because
+# `SessionPrincipal` and `AccessClaims` are duck-type-compatible on
+# `sub`/`roles`, so this app needs exactly one set of route handlers and
+# one authorization rule rather than a parallel API per client type.
+#
+# The session-first ordering is load-bearing, not cosmetic -- see the
+# vendored `build_get_current_principal_either`'s own docstring: were
+# bearer checked first, a request carrying both a live session cookie and
+# an attacker-supplied `Authorization` header would authenticate as the
+# attacker's token. The decision is made from what is present on the
+# request, never from anything the client declares about itself, matching
+# `references/wiring/auth-end-to-end.md`'s per-request transport rule.
+get_current_principal = build_get_current_principal_either(get_session_service, get_auth_service)
+
+# The SESSION-ONLY principal. Same resolution as the default above minus
+# the bearer fallback -- for a route that must refuse a bearer token
+# outright (an admin console served exclusively to browsers, say, where
+# accepting a long-lived token would undercut the immediate-revocation
+# property the session path exists for). Not used by any route in this
+# block today; provided so choosing it is a one-line change rather than a
+# rewrite.
+get_session_principal = build_get_current_session_principal(get_session_service)
+
+# The BEARER-ONLY principal, for native and mobile clients (which have a
+# real OS-backed secret store and no ambient-cookie exposure) and for
+# service-to-service callers (which have no user session to look up at
+# all). Kept fully wired and fully supported -- preferring sessions is a
+# default, not a deprecation. `app/api/routers/auth.py`'s
+# `POST /auth/login` serves this path on an explicit `X-Auth-Mode: bearer`
+# request.
+get_bearer_principal = build_get_current_principal(get_auth_service)
+
+# The RBAC admin example's gate -- `require_roles(...)` is the vendored
+# component's generic role-AND-set dependency factory
+# (`app/core/security/auth/fastapi.py`), bound here once against the
+# DEFAULT (session) principal. It works identically against either
+# principal because `SessionPrincipal` is duck-type-compatible with
+# `AccessClaims` on `sub`/`roles` (see that dataclass's own docstring), so
+# one role gate covers both transports and there is no second, parallel
+# authorization rule to keep in sync. `app/api/routers/admin.py`'s
+# `GET /admin/ping` is the one route that depends on this today; any future
+# admin-only route reuses this SAME dependency rather than calling
+# `require_roles(...)` again at each call site.
 require_admin = require_roles(get_current_principal, "admin")
+
+# The bearer-path equivalent of `require_admin`, for a role-gated route
+# served to native/mobile clients. Same factory, same AND-semantics, same
+# `InsufficientRole` -> 403 -- only the principal it resolves differs.
+require_admin_bearer = require_roles(get_bearer_principal, "admin")

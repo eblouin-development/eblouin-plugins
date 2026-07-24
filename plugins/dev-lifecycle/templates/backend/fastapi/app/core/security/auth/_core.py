@@ -974,6 +974,25 @@ class LockoutPolicy:
 # ---------------------------------------------------------------------------
 
 
+class SessionRevoker(Protocol):
+    """The ONE method `AccountService` needs from the server-side-session
+    path: "kill every session this user has." `_sessions.SessionService`
+    satisfies this structurally -- no registration, no subclassing, and
+    crucially **no import**: declaring the shape here rather than importing
+    `_sessions.SessionService` is what keeps this file standalone-importable
+    (`_core.py` depends on no sibling in this component, which is what lets
+    a project vendor it alone).
+
+    Deliberately narrow. `AccountService` has no business creating,
+    resolving, or rotating sessions -- it only ever needs to revoke them
+    wholesale, on a password reset. A wider Protocol here would invite
+    coupling that isn't needed and would make this seam harder to satisfy
+    with something other than `SessionService` (an app that keeps sessions
+    somewhere unusual can implement this single method and be done)."""
+
+    async def revoke_all_for_user(self, user_id: str) -> None: ...
+
+
 class AuthEventSink(Protocol):
     """Lets `AuthService`/`AccountService` emit auth events (login
     success/failure/denial, lockout triggering, email verification,
@@ -1084,11 +1103,75 @@ class AuthService:
         password_hash = self._passwords.hash(password)
         return await self._users.create(normalized, password_hash, tuple(roles))
 
+    async def authenticate(self, email: str, password: str) -> UserRecord:
+        """Verifies credentials and returns the `UserRecord`, minting
+        NOTHING. This is the credential-verification half of `login`
+        below, split out so the SESSION path can reuse it verbatim.
+
+        **Why this exists.** A session login needs exactly what this
+        returns -- an authenticated `UserRecord` to hand to
+        `_sessions.SessionService.create` -- and nothing else. Before this
+        split, a session login had to call `login()` and discard the
+        `TokenPair` it produced, which was not merely wasteful: it
+        persisted a `RefreshRecord` for a refresh token no client would
+        ever hold, leaving a row in the refresh-token table that could only
+        ever expire unused, and starting a token family that logout would
+        never revoke. Calling this method instead means the session path
+        writes exactly one row (its own session) and touches the JWT
+        machinery not at all.
+
+        Every check, every failure mode, every audit event, and the
+        Argon2id timing guarantee are IDENTICAL to `login`'s -- because
+        `login` is now literally this method plus a mint step. See
+        `login`'s own docstring below for the full ordered flow; there is
+        no second copy of that logic to drift.
+
+        Callers: `login` below (the JWT path), and a project's own session
+        login route (the default browser path) -- e.g. this component's
+        FastAPI backend block, whose `POST /auth/login` calls
+        `authenticate` then `SessionService.create`."""
+        normalized = self._normalize_email(email)
+        user = await self._users.get_by_email(normalized)
+        if user is None:
+            self._passwords.dummy_verify()
+            if self._events is not None:
+                await self._events.emit("auth.login", actor="anonymous", outcome="failure")
+            raise InvalidCredentials("Invalid email or password.")
+        if self._lockout is not None and await self._lockout.is_locked(user.id):
+            self._passwords.dummy_verify()
+            if self._events is not None:
+                await self._events.emit("auth.login", actor=user.id, outcome="denied")
+            raise InvalidCredentials("Invalid email or password.")
+        if not self._passwords.verify(user.password_hash, password):
+            if self._lockout is not None:
+                just_locked = await self._lockout.record_failure(user.id)
+                if just_locked and self._events is not None:
+                    await self._events.emit("auth.lockout.triggered", actor=user.id, outcome="denied")
+            if self._events is not None:
+                await self._events.emit("auth.login", actor=user.id, outcome="failure")
+            raise InvalidCredentials("Invalid email or password.")
+        if self._require_verification and not user.email_verified:
+            if self._events is not None:
+                await self._events.emit("auth.login", actor=user.id, outcome="denied")
+            raise InvalidCredentials("Invalid email or password.")
+        if self._lockout is not None:
+            await self._lockout.clear(user.id)
+        if self._events is not None:
+            await self._events.emit("auth.login", actor=user.id, outcome="success")
+        return user
+
     async def login(self, email: str, password: str) -> TokenPair:
-        """Verifies credentials and, on success, starts a brand-new
-        refresh-token FAMILY (a fresh `family_id`), mints an access +
-        refresh token pair in it, persists the refresh token's
-        `RefreshRecord`, and returns the pair.
+        """Verifies credentials (via `authenticate` above) and, on
+        success, starts a brand-new refresh-token FAMILY (a fresh
+        `family_id`), mints an access + refresh token pair in it, persists
+        the refresh token's `RefreshRecord`, and returns the pair.
+
+        **This is the JWT/bearer path.** A browser client should
+        authenticate with a server-side session instead -- see
+        `_sessions.py`'s module docstring for why, and `authenticate`
+        above for the primitive that path calls in place of this method.
+        Behavior here is byte-for-byte what it has always been; only the
+        credential-checking half now lives in `authenticate`.
 
         Every failure path -- unknown email, wrong password, a locked
         account, or (with `require_verification=True`) an unverified
@@ -1129,35 +1212,11 @@ class AuthService:
         6. **Success** -> if `lockout` is set, clear its bookkeeping for
            this account (`LockoutPolicy.clear`); emit `auth.login`
            `outcome="success"`; mint and persist a new token pair in a
-           brand-new family, exactly as before."""
-        normalized = self._normalize_email(email)
-        user = await self._users.get_by_email(normalized)
-        if user is None:
-            self._passwords.dummy_verify()
-            if self._events is not None:
-                await self._events.emit("auth.login", actor="anonymous", outcome="failure")
-            raise InvalidCredentials("Invalid email or password.")
-        if self._lockout is not None and await self._lockout.is_locked(user.id):
-            self._passwords.dummy_verify()
-            if self._events is not None:
-                await self._events.emit("auth.login", actor=user.id, outcome="denied")
-            raise InvalidCredentials("Invalid email or password.")
-        if not self._passwords.verify(user.password_hash, password):
-            if self._lockout is not None:
-                just_locked = await self._lockout.record_failure(user.id)
-                if just_locked and self._events is not None:
-                    await self._events.emit("auth.lockout.triggered", actor=user.id, outcome="denied")
-            if self._events is not None:
-                await self._events.emit("auth.login", actor=user.id, outcome="failure")
-            raise InvalidCredentials("Invalid email or password.")
-        if self._require_verification and not user.email_verified:
-            if self._events is not None:
-                await self._events.emit("auth.login", actor=user.id, outcome="denied")
-            raise InvalidCredentials("Invalid email or password.")
-        if self._lockout is not None:
-            await self._lockout.clear(user.id)
-        if self._events is not None:
-            await self._events.emit("auth.login", actor=user.id, outcome="success")
+           brand-new family, exactly as before.
+
+        Steps 1-6 are `authenticate`'s body, not a copy of it -- this
+        method is that call plus the mint below."""
+        user = await self.authenticate(email, password)
         family_id = uuid.uuid4().hex
         return await self._mint_and_persist(user, family_id)
 
@@ -1273,6 +1332,27 @@ class AuthService:
         interface a framework adapter already depends on."""
         return self._tokens.decode_access(raw_access_token)
 
+    async def issue_session(self, user: UserRecord) -> TokenPair:
+        """Mints a brand-new refresh-token FAMILY and an access+refresh pair
+        for a principal whose identity was ALREADY established by some means
+        other than this class's own password check -- the sole caller in
+        this catalog is `_oauth.py`'s `OAuthAccountService.complete_login`,
+        invoked once federated (Google/GitHub/Apple) identity has been
+        resolved and linked to a `UserRecord`. No credential is verified
+        here; that is entirely `OAuthAccountService`'s job before this is
+        ever called. Emits `auth.login` `outcome="success"`, `method="oauth"`
+        (when `events` is wired) so an audit trail can distinguish a
+        federated login from a password one via the SAME event name a
+        password login emits. Mirrors `login`'s own tail exactly -- a fresh
+        `family_id`, `_mint_and_persist` -- issuing the identical session/
+        token shape either path produces, which is the whole point: a
+        federated login is indistinguishable, downstream, from a password
+        one."""
+        if self._events is not None:
+            await self._events.emit("auth.login", actor=user.id, outcome="success", method="oauth")
+        family_id = uuid.uuid4().hex
+        return await self._mint_and_persist(user, family_id)
+
     async def _mint_and_persist(self, user: UserRecord, family_id: str) -> TokenPair:
         """Shared by `login` (new family) and `refresh` (existing family,
         rotation) -- mints a fresh access + refresh token pair, persists
@@ -1360,6 +1440,7 @@ class AccountService:
         *,
         events: AuthEventSink | None = None,
         lockout: LockoutPolicy | None = None,
+        sessions: "SessionRevoker | None" = None,
         frontend_base_url: str,
         verify_ttl: timedelta = timedelta(hours=24),
         reset_ttl: timedelta = timedelta(hours=1),
@@ -1382,6 +1463,20 @@ class AccountService:
         # `None` (the default) simply skips that clear -- a project not using
         # lockout, or wiring `AccountService` in isolation, is unaffected.
         self._lockout = lockout
+        # Optional -- the SERVER-SIDE SESSION half of "a password reset logs
+        # you out everywhere". `refresh_tokens.revoke_all_for_user` above
+        # kills every JWT refresh family; this kills every session on the
+        # (default, browser) session path. A project serving both transports
+        # MUST wire both, or a reset leaves the account half-revoked: the
+        # attacker's session cookie would keep authenticating even though
+        # every refresh token was killed. `None` (the default) skips it
+        # entirely, so a project on the JWT path only is unaffected and every
+        # prior call site keeps working unchanged. Typed as `SessionRevoker`
+        # -- a one-method Protocol declared below -- rather than importing
+        # `_sessions.SessionService` directly, which would make this file
+        # depend on its own sibling and break `_core.py`'s standalone-import
+        # guarantee; `SessionService` satisfies it structurally.
+        self._sessions = sessions
         self._frontend_base_url = frontend_base_url.rstrip("/")
         self._verify_ttl = verify_ttl
         self._reset_ttl = reset_ttl
@@ -1517,7 +1612,11 @@ class AccountService:
         family the user has (`RefreshTokenStore.revoke_all_for_user`) --
         killing every existing logged-in session everywhere, since
         whatever was true about the account's security under the OLD
-        password can no longer be assumed once it's been reset. If a
+        password can no longer be assumed once it's been reset. **If a
+        `sessions` revoker was wired, ALSO revokes every server-side
+        session** (`SessionRevoker.revoke_all_for_user`) -- the two
+        transports are revoked together, since killing only one leaves the
+        account half-revoked (see `__init__`'s own `sessions` note). If a
         `lockout` policy was wired, also clears any failed-login lockout on
         the account (see `__init__`'s `lockout` note) so the reset restores
         access immediately.
@@ -1557,6 +1656,13 @@ class AccountService:
         new_hash = self._passwords.hash(new_password)
         await self._users.set_password_hash(user_id, new_hash)
         await self._refresh_tokens.revoke_all_for_user(user_id)
+        # The server-side-session half of the same "log out everywhere"
+        # guarantee the refresh revocation above provides for the JWT path.
+        # A project serving both transports must wire `sessions=` or a reset
+        # leaves the account half-revoked -- see `__init__`'s own note. No-op
+        # when it isn't wired.
+        if self._sessions is not None:
+            await self._sessions.revoke_all_for_user(user_id)
         # Lift any failed-login lockout the user accrued before resetting --
         # a completed reset (proving control of the account's email) should
         # restore access immediately, not leave the user blocked at login's

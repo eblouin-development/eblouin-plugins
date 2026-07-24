@@ -287,6 +287,44 @@ class Settings(AppSettings):
         "thing to have floating around than an unconsumed verify link.",
     )
 
+    # --- Server-side sessions: the DEFAULT browser authentication path.
+    # `app/core/security/auth/stores.py:build_session_service` reads all
+    # three. None of them is a secret -- a session id is opaque and
+    # unguessable rather than signed, so unlike jwt_signing_key above there
+    # is nothing here to load from a secret store and nothing to fail
+    # closed on. See app/core/security/auth/_sessions.py's module docstring
+    # for why this path is preferred over JWT for browser clients. --------
+    session_idle_ttl_seconds: int = Field(
+        default=43_200,
+        description="SessionService's idle_ttl, 12 hours -- the SLIDING "
+        "deadline, measured against a session's last_seen_at. A session "
+        "unused for this long stops authenticating, which is what makes an "
+        "abandoned session on a shared or stolen machine expire without the "
+        "user doing anything. Shorten it for a higher-sensitivity app (a "
+        "banking or admin console might use 15-30 minutes); it composes "
+        "with, and can never be overridden by, the absolute ceiling below.",
+    )
+    session_absolute_ttl_seconds: int = Field(
+        default=604_800,
+        description="SessionService's absolute_ttl, 7 days -- the HARD "
+        "ceiling, measured against a session's created_at and unaffected by "
+        "activity. Without it, a session an attacker keeps warm with a "
+        "periodic request would live forever: sliding expiry alone rewards "
+        "precisely the party actively using a stolen cookie. A session must "
+        "be inside BOTH this and session_idle_ttl_seconds to authenticate.",
+    )
+    session_touch_interval_seconds: int = Field(
+        default=60,
+        description="SessionService's touch_interval, 1 minute -- how stale "
+        "last_seen_at must be before a live request writes it back. This is "
+        "the knob that keeps every authenticated GET from becoming a "
+        "database write, the usual way server-side sessions turn into a "
+        "write-throughput problem. It shortens the EFFECTIVE idle window by "
+        "at most this much, so keep it orders of magnitude below "
+        "session_idle_ttl_seconds; it can only ever expire a session "
+        "slightly early, never keep a stale one alive.",
+    )
+
     # --- Web cookie mode (Stage 5d, #46): app/main.py's create_app() reads
     # this to decide whether the CORS policy it constructs allows
     # credentials (cookies) and the two extra request headers cookie mode

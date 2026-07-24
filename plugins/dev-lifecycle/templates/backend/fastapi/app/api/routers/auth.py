@@ -35,25 +35,36 @@ events) is entirely `AuthService`'s job as of `app/api/deps.py:
 get_auth_service`'s Stage 5c wiring — this file's `login` handler itself
 is byte-for-byte unchanged from Stage 5a.
 
-Stage 5d (#46) adds WEB COOKIE MODE to `login`/`refresh`/`logout` — an
-`X-Auth-Mode: cookie` request header on `POST /auth/login` (default/
-anything-else = bearer, the UNCHANGED current behavior) switches the
-refresh token from the response BODY to an HttpOnly cookie, paired with a
-non-HttpOnly CSRF cookie a SPA echoes back as `X-CSRF-Token` on every
-state-changing cookie-authenticated request (double-submit — see the
-vendored `_cookies.py`'s own module docstring for the full mechanism).
-`refresh`/`logout` are DUAL-SOURCE: `read_refresh_cookie(request)` decides
-which path a given request is on, per-request, not per-client-declared
-mode — a cookie-bearing browser request takes the cookie path (CSRF
-enforced FIRST, before the token is used) and a bearer-only request (no
-cookie ever set, e.g. mobile) takes the existing, byte-for-byte-unchanged
-bearer path. `X-Auth-Mode` is deliberately read directly off
-`request.headers` (not a declared FastAPI `Header(...)` parameter) — see
-`login`'s own docstring for why: this keeps it OUT of the exported
-OpenAPI schema as a documented parameter, so this stage's contract diff
-is exactly the new `/admin/ping` operation (`app/api/routers/admin.py`),
-not a parameter addition on an existing one. `enforce_csrf` reads
-`X-CSRF-Token` the identical way, for the identical reason."""
+**SERVER-SIDE SESSIONS ARE THE DEFAULT.** `POST /auth/login` issues an
+opaque session id in an `HttpOnly` `session_id` cookie unless the caller
+explicitly sends `X-Auth-Mode: bearer`, and `GET /auth/me` (like every
+other protected route in this app) authenticates against that session via
+`app/api/deps.py`'s `get_current_principal`. The JWT/bearer path is fully
+wired and fully supported for native/mobile clients and service-to-service
+callers — it is a documented exception, not a deprecation. See the
+vendored `app/core/security/auth/_sessions.py`'s module docstring for why
+a browser client should prefer a session (immediate revocation, live role
+reads, an enforceable idle timeout, and nothing readable left in the
+browser), and this block's README "Sessions" section for the wiring.
+
+Transport is decided per request, never from a client's claim about
+itself: `login` reads `X-Auth-Mode` (absent/unrecognized → session; the
+literal `"bearer"` → JWT), and `logout` decides by which credential is
+ACTUALLY present on the request (`session_id` cookie → session path,
+`refresh_token` cookie → refresh-cookie path, neither → bearer body). A
+forged or absent cookie therefore cannot claim a path it does not hold.
+`X-Auth-Mode` is read directly off `request.headers` rather than as a
+declared FastAPI `Header(...)` parameter, which keeps it out of the
+exported OpenAPI schema as a documented parameter; `enforce_csrf` reads
+`X-CSRF-Token` the identical way, for the identical reason.
+
+CSRF is enforced on every state-changing cookie-authenticated request via
+double-submit (see the vendored `_cookies.py`'s own module docstring).
+Session mode's cookie is scoped `Path=/`, so that obligation extends to
+every unsafe-method route in the app, not just `/auth/*` — this app meets
+it with `app/api/middleware/csrf.py`, a single method-filtering
+middleware, rather than a per-route call that a future route could
+forget."""
 
 from __future__ import annotations
 
@@ -62,20 +73,30 @@ import uuid
 from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_account_service, get_auth_service, get_current_principal
+from app.api.deps import (
+    get_account_service,
+    get_auth_service,
+    get_current_principal,
+    get_session_service,
+)
 from app.core.db import get_db
 from app.core.errors import ErrorEnvelope
 from app.core.security.auth import (
-    AccessClaims,
     AccountService,
     AuthService,
     InvalidToken,
+    SessionPrincipal,
+    SessionService,
     clear_auth_cookies,
+    clear_session_cookies,
     enforce_csrf,
     generate_csrf_token,
     read_refresh_cookie,
+    read_session_cookie,
     set_auth_cookies,
+    set_session_cookies,
 )
+from app.core.security.auth.stores import utc_now
 from app.core.security.auth.stores import AuditAuthEventSink, SqlAlchemyUserStore
 from app.schemas.auth import (
     LoginRequest,
@@ -193,40 +214,75 @@ async def login(
     request: Request,
     response: Response,
     auth_service: AuthService = Depends(get_auth_service),
+    session_service: SessionService = Depends(get_session_service),
 ) -> TokenResponse:
-    """Delegates to `AuthService.login` — raises `InvalidCredentials`
-    (-> 401 `unauthenticated`) identically for an unknown email or a wrong
-    password (see that exception's own docstring on the deliberate
+    """Verifies credentials through `AuthService.login` — raises
+    `InvalidCredentials` (-> 401 `unauthenticated`) identically for an
+    unknown email, a wrong password, a locked account, or an unverified
+    one (see that exception's own docstring on the deliberate
     user-enumeration defense), uncaught here.
 
-    Stage 5d (#46) web cookie mode: `request.headers.get("X-Auth-Mode")
-    == "cookie"` switches this call into cookie mode — read directly off
-    `request.headers`, deliberately NOT a declared `Header(...)`
-    parameter (see this module's own docstring for why: keeps it out of
-    the exported OpenAPI schema as a documented parameter). Anything
-    else (absent header, any other value) is BEARER mode — the exact,
-    unchanged current behavior; mode is NEVER inferred from User-Agent or
-    any other signal, matching the locked design. No CSRF check on login
-    either way: login is credential-authenticated (email+password), and
-    there is no cookie yet for a CSRF check to protect.
+    **Session mode is the DEFAULT.** `request.headers.get("X-Auth-Mode")`
+    selects the transport across three values:
 
-    Cookie mode still returns the SAME `TokenResponse` shape — the wire
-    contract (`packages/api-client/openapi.json`'s `TokenResponse`
-    schema) is byte-unchanged — but with `refresh_token=""` in the body
-    (an empty string still satisfies the schema's required `str` field);
-    the real refresh JWT travels ONLY in the HttpOnly `refresh_token`
-    cookie `set_auth_cookies` sets below, alongside a fresh, independent
-    CSRF cookie (`generate_csrf_token()` — never derived from either
-    token) the SPA echoes back as `X-CSRF-Token` on every cookie-
-    authenticated `/auth/refresh`/`/auth/logout` call. `max_age` is this
-    request's own `jwt_refresh_ttl_seconds`, read off `request.app.state.
-    settings` — the SAME `Settings` instance this app was actually
-    constructed with (see `app/api/deps.py:get_auth_service`'s own
-    docstring on why that's read this way rather than `Depends(
-    get_settings)`), so neither cookie outlives the refresh token it's
-    paired with."""
-    pair = await auth_service.login(payload.email, payload.password)
-    if request.headers.get("X-Auth-Mode") == "cookie":
+    | `X-Auth-Mode` | Transport |
+    | --- | --- |
+    | absent, `"session"`, or anything unrecognized | **SESSION** (default) |
+    | `"bearer"` | JWT access + refresh in the response body |
+    | `"cookie"` | JWT refresh token in an `HttpOnly` `Path=/auth` cookie |
+
+    Read directly off `request.headers`, deliberately NOT a declared
+    `Header(...)` parameter (see this module's own docstring: keeps it out
+    of the exported OpenAPI schema as a documented parameter). Mode is
+    NEVER inferred from `User-Agent` or any other signal — a client asks
+    for a non-default path explicitly or gets the default, which is the
+    safer direction for an unrecognized value to fall.
+
+    **`"cookie"` mode is superseded, not removed.** It put the JWT refresh
+    token in a cookie to keep it out of JS's reach — the right answer
+    before this app had server-side sessions, and strictly worse than
+    session mode now: it still leaves a bearer access token in the JS heap,
+    still cannot be revoked before its TTL, and still needs the refresh
+    round-trip session mode does without. It stays wired for a project
+    mid-migration; new work should use the default.
+
+    - **Session mode (browsers).** `AuthService.login` verifies the
+      password and its token pair is DISCARDED unused — the credential
+      that actually authenticates subsequent requests is the opaque
+      session id `SessionService.create` mints. `set_session_cookies`
+      writes the `HttpOnly` `session_id` cookie plus a fresh,
+      independent CSRF cookie (`generate_csrf_token()` — never derived
+      from the session id) the SPA echoes back as `X-CSRF-Token` on every
+      unsafe-method request. `max_age` comes from
+      `IssuedSession.max_age_seconds(utc_now())`, measured to the
+      session's ABSOLUTE deadline so the cookie survives an idle period
+      and the SERVER, not the browser, is what decides a session went
+      stale. The response body is `TokenResponse` with BOTH fields empty
+      — the wire schema is unchanged, and empty is honest: in session
+      mode there is no token for the client to hold, which is the entire
+      point (nothing in the JS heap for an XSS payload to exfiltrate).
+    - **Bearer mode (native/mobile, service-to-service).** The exact,
+      unchanged prior behavior: the real access and refresh JWTs are
+      returned in the body, no cookies are set, and no session row is
+      created.
+
+    Both paths run the SAME credential check — `AuthService.authenticate`,
+    which owns Argon2id verification, the `dummy_verify` timing defense,
+    lockout, and the `require_verification` gate. The session path calls it
+    directly rather than calling `login()` and discarding the token pair:
+    doing the latter would persist a `RefreshRecord` for a refresh token no
+    client will ever hold, starting a token family logout would never
+    revoke. See that method's own docstring.
+
+    No CSRF check on login in either mode: login is authenticated by the
+    credentials in the body, and there is no cookie yet for a forged
+    request to ride."""
+    mode = request.headers.get("X-Auth-Mode")
+    if mode == "bearer":
+        pair = await auth_service.login(payload.email, payload.password)
+        return TokenResponse(access_token=pair.access, refresh_token=pair.refresh)
+    if mode == "cookie":
+        pair = await auth_service.login(payload.email, payload.password)
         set_auth_cookies(
             response,
             refresh_value=pair.refresh,
@@ -234,7 +290,15 @@ async def login(
             max_age=request.app.state.settings.jwt_refresh_ttl_seconds,
         )
         return TokenResponse(access_token=pair.access, refresh_token="", token_type="bearer")
-    return TokenResponse(access_token=pair.access, refresh_token=pair.refresh)
+    user = await auth_service.authenticate(payload.email, payload.password)
+    issued = await session_service.create(user)
+    set_session_cookies(
+        response,
+        session_value=issued.session_id,
+        csrf_value=generate_csrf_token(),
+        max_age=issued.max_age_seconds(utc_now()),
+    )
+    return TokenResponse(access_token="", refresh_token="", token_type="session")
 
 
 @router.post("/refresh", response_model=TokenResponse, summary="Refresh token", responses=_UNAUTHENTICATED_RESPONSE)
@@ -244,7 +308,16 @@ async def refresh(
     response: Response,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    """Delegates to `AuthService.refresh` — THE rotation-with-reuse-
+    """**The JWT path only — a session client never calls this.** There is
+    no refresh step in session mode: `SessionService.resolve` slides the
+    session's idle deadline forward on every authenticated request (see
+    its `touch_interval` bound), so the credential renews itself as a side
+    effect of being used, up to the absolute ceiling. Not having a refresh
+    endpoint to call is one of the things session mode buys — the entire
+    rotation-and-reuse-detection state machine below exists to compensate
+    for a bearer token the server cannot revoke.
+
+    Delegates to `AuthService.refresh` — THE rotation-with-reuse-
     detection state machine (see `_core.py`'s own module docstring and
     `AuthService.refresh`'s docstring for the full 6-step state machine).
     Raises `InvalidToken` or `TokenReused` (both -> 401 `unauthenticated`,
@@ -296,72 +369,98 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Logout")
 async def logout(
-    payload: RefreshRequest,
     request: Request,
     response: Response,
+    payload: RefreshRequest | None = None,
     auth_service: AuthService = Depends(get_auth_service),
+    session_service: SessionService = Depends(get_session_service),
 ) -> None:
-    """Delegates to `AuthService.logout` — best-effort and idempotent by
-    design (see that method's own docstring): an already-invalid, unknown,
-    or already-revoked refresh token still returns 204, never an error.
-    Revokes the entire token family, not just the presented token.
+    """Ends the caller's session, whichever transport they authenticated
+    with. **TRIPLE-SOURCE**, decided per request by which credential is
+    actually present — never by a header the client declares, so a forged
+    or absent cookie cannot claim a path it does not hold.
 
-    Stage 5d (#46) web cookie mode: same dual-source shape as `refresh`
-    above, decided by `read_refresh_cookie(request)`.
+    - **Session path** (`session_id` cookie present) — the default.
+      `enforce_csrf(request)` runs FIRST: logout is state-changing, so a
+      request with a missing/blank/mismatched `X-CSRF-Token` is rejected
+      403 at that gate and never reaches the revocation. Past the gate,
+      `SessionService.revoke` kills the server-side row — the half that
+      actually matters, since it stops the id authenticating even for a
+      client that ignores the cookie-delete instruction — and
+      `clear_session_cookies` clears both cookies. `revoke` is idempotent
+      and never raises (see its own docstring), so a stale or unknown
+      session id still 204s rather than becoming an oracle that
+      distinguishes real ids from invented ones.
+    - **Refresh-cookie path** (`refresh_token` cookie present): unchanged
+      prior behavior — CSRF enforced first, then `AuthService.logout`
+      revokes the whole token family, then `clear_auth_cookies`.
+    - **Bearer path** (no cookie at all): unchanged — the body's
+      `refresh_token`, no CSRF check, 204 either way.
 
-    - **Cookie path** (cookie present): JUDGMENT CALL — logout is
-      STATE-CHANGING (it revokes the presented token's entire family via
-      `AuthService.logout`), so this endpoint enforces the double-submit
-      CSRF check on the cookie path too, `enforce_csrf(request)` called
-      BEFORE the best-effort logout runs — a cookie-present request with
-      a missing/blank/mismatched `X-CSRF-Token` is rejected 403 at that
-      gate and `AuthService.logout` is never even called; it does NOT
-      reach 204. This does not weaken `AuthService.logout`'s own
-      idempotency for the TOKEN itself — a bad/expired/already-revoked
-      cookie value, once past the CSRF gate, still 204s exactly as the
-      bearer path already does. On success, clears both cookies
-      (`clear_auth_cookies`).
-    - **Bearer path** (no cookie): the exact, unchanged prior behavior —
-      the body's `refresh_token`, no CSRF check, 204 either way."""
+    Checked in that order because the session cookie is the default
+    credential; a request carrying both (only possible mid-migration, and
+    discouraged — see the vendored `_cookies.py`'s "running both paths at
+    once") has its session ended, which is the credential that would
+    otherwise still authenticate every route.
+
+    **The request BODY is optional** (`RefreshRequest | None`), because a
+    session client genuinely has no refresh token to send — requiring one
+    would force it to invent a value to satisfy `RefreshRequest`'s
+    `min_length=1`, and a 422 on logout for a client with nothing to put
+    in the body would be an absurd contract. The body is read only on the
+    bearer path, where it is the credential; a bearer request that omits it
+    still 204s, since logout is idempotent and there is nothing to
+    revoke."""
+    session_id = read_session_cookie(request)
+    if session_id is not None:
+        enforce_csrf(request)
+        await session_service.revoke(session_id)
+        clear_session_cookies(response)
+        return None
     cookie_refresh_token = read_refresh_cookie(request)
     if cookie_refresh_token is not None:
         enforce_csrf(request)
         await auth_service.logout(cookie_refresh_token)
         clear_auth_cookies(response)
         return None
-    await auth_service.logout(payload.refresh_token)
+    if payload is not None:
+        await auth_service.logout(payload.refresh_token)
     return None
 
 
 @router.get("/me", response_model=PrincipalOut, summary="Current principal", responses=_UNAUTHENTICATED_RESPONSE)
 async def me(
-    claims: AccessClaims = Depends(get_current_principal),
+    principal: SessionPrincipal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ) -> PrincipalOut:
     """`get_current_principal` (the vendored component's
-    `build_get_current_principal`, bound in `app/api/deps.py`) already
-    verified the bearer access token and resolved it to `AccessClaims`
-    before this handler body ever runs — a missing/malformed/expired
-    token never reaches here at all (see that dependency's own docstring;
-    it raises `InvalidToken` -> 401 `unauthenticated` itself).
+    `build_get_current_session_principal`, bound in `app/api/deps.py`)
+    already resolved the caller's `session_id` cookie into a live
+    `SessionPrincipal` before this handler body ever runs — a missing,
+    revoked, idle-expired, or otherwise dead session never reaches here at
+    all (it raises `InvalidSession` -> 401 `unauthenticated` itself).
 
-    `AccessClaims` carries `sub` (the user id) and `roles`, but not
+    `SessionPrincipal` carries `sub` (the user id) and `roles`, but not
     `email` — this handler does one direct `SqlAlchemyUserStore.get_by_id`
     lookup to fill in `PrincipalOut.email`, independent of `AuthService`
     (which has no "fetch a profile" method — see `_core.py`'s `UserStore`
-    Protocol; it's a storage seam for `AuthService`'s own register/login/
-    refresh flows, not a general user-lookup API this router reaches for).
+    Protocol; it's a storage seam for the auth flows, not a general
+    user-lookup API this router reaches for).
 
-    The user having been deleted BETWEEN minting the access token and this
-    request (a real, if narrow, race — access tokens are not individually
-    revocable, see `Settings.jwt_access_ttl_seconds`'s own docstring) is
-    treated as `InvalidToken` (401), matching `AuthService.refresh`'s
-    identical "row valid but the user it points to is gone" handling —
-    NOT a 404, since the token itself is what's no longer trustworthy, not
-    a missing resource the caller asked for by id."""
-    user = await SqlAlchemyUserStore(db).get_by_id(claims.sub)
+    The `user is None` branch below is now nearly unreachable, and that is
+    itself the point: `SessionService.resolve` already loads the user on
+    every request and rejects a session whose account has been deleted, so
+    the "credential valid but its user is gone" race the bearer path has
+    to live with (an access JWT is not individually revocable — see
+    `Settings.jwt_access_ttl_seconds`) simply does not exist here. The
+    check is kept as defense in depth against a deletion landing between
+    those two reads within this one request, and raises `InvalidToken`
+    (401) rather than 404 for the same reason it always did: it is the
+    credential that is no longer trustworthy, not a resource the caller
+    asked for by id."""
+    user = await SqlAlchemyUserStore(db).get_by_id(principal.sub)
     if user is None:
-        raise InvalidToken("This token no longer maps to an active user.")
+        raise InvalidToken("This session no longer maps to an active user.")
     return PrincipalOut(id=uuid.UUID(user.id), email=user.email)
 
 

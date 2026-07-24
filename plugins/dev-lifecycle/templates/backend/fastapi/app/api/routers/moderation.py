@@ -12,7 +12,7 @@ privileged surface.
 endpoint anywhere in this router or this app — a consuming app writes
 `Flag` rows itself (via the ORM); this router only ships the admin list/
 get/resolve/dismiss surface over rows that already exist. Every mutation
-below calls `audit_event(...)` with `actor=claims.sub`, a `type:id`
+below calls `audit_event(...)` with `actor=principal.sub`, a `type:id`
 `resource` string, `outcome="success"`, and (for `resolve`) an `extra`
 payload noting the action taken and the target acted on — ids only, never
 PII — same posture `admin.py`/`blog.py`'s own module docstrings document.
@@ -57,7 +57,7 @@ from app.api.routers.admin import _ensure_not_self, ban_user, require_admin_rate
 from app.core.db import AsyncRepository, Page, PageParams, get_db
 from app.core.errors import ConflictError, ErrorEnvelope, NotFoundError, ValidationFailedError
 from app.core.security.audit_logging.audit import audit_event
-from app.core.security.auth import AccessClaims
+from app.core.security.auth import SessionPrincipal
 from app.core.security.auth.stores import utc_now
 from app.models.blog_post import BlogPost
 from app.models.comment import Comment
@@ -168,7 +168,7 @@ async def list_admin_flags(
     params: PageParams = Depends(),
     status_filter: FlagStatus | None = Query(default=None, alias="status"),
     target_type_filter: FlagTargetType | None = Query(default=None, alias="target_type"),
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> Page[FlagOut]:
@@ -194,7 +194,7 @@ async def list_admin_flags(
 )
 async def get_admin_flag(
     flag_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> FlagOut:
@@ -215,7 +215,7 @@ async def get_admin_flag(
 async def resolve_admin_flag(
     flag_id: uuid.UUID,
     payload: FlagResolveIn,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> FlagOut:
@@ -241,7 +241,7 @@ async def resolve_admin_flag(
         await _delete_content(db, flag)
     elif payload.action == ResolveAction.BAN_AUTHOR:
         author = await _resolve_author(db, flag)
-        _ensure_not_self(claims, author.id, action="ban")
+        _ensure_not_self(principal, author.id, action="ban")
         await ban_user(db, author)
         audit_extra["banned_user"] = str(author.id)
     else:  # pragma: no cover - unreachable, ResolveAction is a closed StrEnum FastAPI already validates at 422
@@ -250,13 +250,13 @@ async def resolve_admin_flag(
     flag = await repo.update(
         flag,
         status=FlagStatus.RESOLVED.value,
-        resolved_by_id=uuid.UUID(claims.sub),
+        resolved_by_id=uuid.UUID(principal.sub),
         resolved_at=utc_now(),
         resolution_note=payload.note,
     )
     audit_event(
         "admin.flag.resolve",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"flag:{flag.id}",
         outcome="success",
         action_taken=payload.action.value,
@@ -276,7 +276,7 @@ async def resolve_admin_flag(
 async def dismiss_admin_flag(
     flag_id: uuid.UUID,
     payload: FlagDismissIn,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> FlagOut:
@@ -292,13 +292,13 @@ async def dismiss_admin_flag(
     flag = await repo.update(
         flag,
         status=FlagStatus.DISMISSED.value,
-        resolved_by_id=uuid.UUID(claims.sub),
+        resolved_by_id=uuid.UUID(principal.sub),
         resolved_at=utc_now(),
         resolution_note=payload.note,
     )
     audit_event(
         "admin.flag.dismiss",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"flag:{flag.id}",
         outcome="success",
     )

@@ -69,7 +69,7 @@ async def _seed_verified_admin(email: str, password: str) -> str:
 
 
 def _login(client: TestClient, email: str, password: str) -> dict:
-    response = client.post("/auth/login", json={"email": email, "password": password})
+    response = client.post("/auth/login", json={"email": email, "password": password}, headers={"X-Auth-Mode": "bearer"})
     assert response.status_code == 200, response.text
     return response.json()
 

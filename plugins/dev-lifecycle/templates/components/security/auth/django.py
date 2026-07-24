@@ -207,6 +207,51 @@ async def require_session_roles(request: Any, session_service: Any, *roles: str)
     return principal
 
 
+async def resolve_principal_either(request: Any, session_service: Any, auth_service: Any) -> Any:
+    """Resolves `request` by **whichever credential it actually carries**
+    -- the `session_id` cookie if present, otherwise an `Authorization:
+    Bearer` token -- returning a `_sessions.SessionPrincipal` or a
+    `_core.AccessClaims` respectively. What a view calls when it must serve
+    BOTH a browser (session, the default) and a native/mobile client
+    (bearer) at the same URL. The Django counterpart of `fastapi.py`'s
+    `build_get_current_principal_either`, with identical semantics --
+    see that factory's docstring for the full reasoning, summarized here:
+
+    - The decision comes from what is present on THIS request, never from
+      anything the client asserts about itself.
+    - **Session is checked FIRST**, and that ordering is load-bearing: were
+      bearer checked first, a request carrying both a live session cookie
+      and an attacker-supplied `Authorization` header would authenticate as
+      the attacker's token. Checking the cookie first means the ambient
+      credential always wins when one exists.
+    - Neither credential present -> `_sessions.InvalidSession` (401), the
+      same shape either path's own failure produces."""
+    session_id = read_session_cookie(request)
+    if session_id is not None:
+        return await session_service.resolve(session_id)
+    header = request.headers.get("Authorization")
+    if header is not None:
+        scheme, _, token = header.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return await auth_service.resolve_access(token)
+    return await session_service.resolve(None)
+
+
+async def require_roles_either(
+    request: Any, session_service: Any, auth_service: Any, *roles: str
+) -> Any:
+    """`resolve_principal_either` plus the same role-membership check
+    `require_roles`/`require_session_roles` apply -- `set(roles) <=
+    set(principal.roles)`, AND semantics, raising `InsufficientRole` (403)
+    otherwise. Works against either credential because
+    `SessionPrincipal` and `AccessClaims` both expose `roles`."""
+    principal = await resolve_principal_either(request, session_service, auth_service)
+    required = set(roles)
+    if not required.issubset(set(principal.roles)):
+        raise InsufficientRole("This action requires a role the current principal does not have.")
+    return principal
+
+
 # ---------------------------------------------------------------------------
 # Bearer/JWT path (native + mobile clients, service-to-service)
 # ---------------------------------------------------------------------------

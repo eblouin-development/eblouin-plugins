@@ -3,7 +3,7 @@
 `app/api/routers/admin.py`'s own admin user-management surface uses, and
 audited/rate-limited EXACTLY the same way: every mutation calls
 `audit_event(...)` (`app/core/security/audit_logging/audit.py`) with
-`actor=claims.sub`, a `type:id` `resource` string, `outcome="success"`,
+`actor=principal.sub`, a `type:id` `resource` string, `outcome="success"`,
 and `changed_fields=[...]` naming which column(s) changed (never raw
 values) — see `admin.py`'s own module docstring for the full rationale,
 identical here. This router deliberately REUSES `admin.py`'s
@@ -41,7 +41,7 @@ from app.api.routers.admin import require_admin_rate_limit
 from app.core.db import AsyncRepository, Page, PageParams, get_db
 from app.core.errors import ConflictError, ErrorEnvelope, NotFoundError
 from app.core.security.audit_logging.audit import audit_event
-from app.core.security.auth import AccessClaims
+from app.core.security.auth import SessionPrincipal
 from app.core.security.auth.stores import utc_now
 from app.models.blog_post import BlogPost
 from app.models.comment import Comment
@@ -127,7 +127,7 @@ async def _unique_slug(db: AsyncSession, base_slug: str) -> str:
 async def list_admin_blog_posts(
     params: PageParams = Depends(),
     status_filter: BlogPostStatus | None = Query(default=None, alias="status"),
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> Page[BlogPostSummaryOut]:
@@ -155,7 +155,7 @@ async def list_admin_blog_posts(
 )
 async def create_admin_blog_post(
     payload: BlogPostCreate,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> BlogPostOut:
@@ -173,7 +173,7 @@ async def create_admin_blog_post(
     that case, see this module's own `_unique_slug` docstring.
 
     The creating admin becomes the post's `author_id` — this stage has no
-    separate "assign an author" concept; `claims.sub` (the access token's
+    separate "assign an author" concept; `principal.sub` (the access token's
     own `sub` claim) is already a user id string, parsed straight to
     `uuid.UUID`."""
     if payload.slug is not None:
@@ -191,11 +191,11 @@ async def create_admin_blog_post(
         title=payload.title,
         body_json=payload.body_json,
         body_html=sanitized_html,
-        author_id=uuid.UUID(claims.sub),
+        author_id=uuid.UUID(principal.sub),
     )
     audit_event(
         "admin.blog.create",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_post:{post.id}",
         outcome="success",
     )
@@ -211,7 +211,7 @@ async def create_admin_blog_post(
 )
 async def get_admin_blog_post(
     post_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> BlogPostOut:
@@ -236,7 +236,7 @@ async def get_admin_blog_post(
 async def update_admin_blog_post(
     post_id: uuid.UUID,
     payload: BlogPostUpdate,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> BlogPostOut:
@@ -271,7 +271,7 @@ async def update_admin_blog_post(
     post = await repo.update(post, **updates)
     audit_event(
         "admin.blog.update",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_post:{post.id}",
         outcome="success",
         changed_fields=sorted(updates.keys()),
@@ -288,7 +288,7 @@ async def update_admin_blog_post(
 )
 async def publish_admin_blog_post(
     post_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> BlogPostOut:
@@ -306,7 +306,7 @@ async def publish_admin_blog_post(
     post = await repo.update(post, status=BlogPostStatus.PUBLISHED.value, published_at=utc_now())
     audit_event(
         "admin.blog.publish",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_post:{post.id}",
         outcome="success",
         changed_fields=["status", "published_at"],
@@ -323,7 +323,7 @@ async def publish_admin_blog_post(
 )
 async def unpublish_admin_blog_post(
     post_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> BlogPostOut:
@@ -341,7 +341,7 @@ async def unpublish_admin_blog_post(
     post = await repo.update(post, status=BlogPostStatus.DRAFT.value, published_at=None)
     audit_event(
         "admin.blog.unpublish",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_post:{post.id}",
         outcome="success",
         changed_fields=["status", "published_at"],
@@ -358,7 +358,7 @@ async def unpublish_admin_blog_post(
 )
 async def delete_admin_blog_post(
     post_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> None:
@@ -372,7 +372,7 @@ async def delete_admin_blog_post(
     await repo.delete(post)
     audit_event(
         "admin.blog.delete",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_post:{post_id}",
         outcome="success",
     )
@@ -394,7 +394,7 @@ async def list_admin_blog_comments(
     params: PageParams = Depends(),
     status_filter: CommentStatus | None = Query(default=None, alias="status"),
     post_id: uuid.UUID | None = Query(default=None),
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> Page[CommentOut]:
@@ -420,7 +420,7 @@ async def list_admin_blog_comments(
 )
 async def hide_admin_blog_comment(
     comment_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> CommentOut:
@@ -438,7 +438,7 @@ async def hide_admin_blog_comment(
     comment = await repo.update(comment, status=CommentStatus.HIDDEN.value)
     audit_event(
         "admin.comment.hide",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_comment:{comment.id}",
         outcome="success",
         changed_fields=["status"],
@@ -455,7 +455,7 @@ async def hide_admin_blog_comment(
 )
 async def delete_admin_blog_comment(
     comment_id: uuid.UUID,
-    claims: AccessClaims = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(require_admin_rate_limit),
 ) -> None:
@@ -468,7 +468,7 @@ async def delete_admin_blog_comment(
     await repo.delete(comment)
     audit_event(
         "admin.comment.delete",
-        actor=claims.sub,
+        actor=principal.sub,
         resource=f"blog_comment:{comment_id}",
         outcome="success",
     )

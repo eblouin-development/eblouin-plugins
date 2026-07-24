@@ -109,10 +109,19 @@ def test_each_minted_token_has_a_unique_jti(token_service):
 
 
 def test_tampered_signature_is_rejected(core_mod, token_service):
-    token = token_service.mint_access("user-1", [])
-    tampered = token[:-1] + ("A" if not token.endswith("A") else "B")
+    # Tampers with the FIRST character of the signature segment, not the
+    # last. The last base64url character of a 32-byte HMAC-SHA256 signature
+    # (43 unpadded chars) encodes only the final 2 significant bits, so
+    # several distinct characters there decode to the SAME signature bytes
+    # -- flipping it therefore left the token validly signed roughly one
+    # run in six, which made this test flaky. Every character earlier in
+    # the segment carries a full 6 bits, so changing one always changes the
+    # decoded signature.
+    header, payload, signature = token_service.mint_access("user-1", []).split(".")
+    flipped = ("A" if signature[0] != "A" else "B") + signature[1:]
+    assert flipped != signature
     with pytest.raises(core_mod.InvalidToken):
-        token_service.decode_access(tampered)
+        token_service.decode_access(f"{header}.{payload}.{flipped}")
 
 
 def test_expired_access_token_is_rejected(core_mod, token_service, clock):
@@ -1194,3 +1203,71 @@ async def test_refresh_reuse_detection_still_works_with_a_lockout_wired_auth_ser
     rotated_row = await refresh_store.get_by_hash(core_mod.hash_token(rotated_pair.refresh))
     assert original_row.revoked is True
     assert rotated_row.revoked is True
+
+
+# ---------------------------------------------------------------------------
+# AuthService.authenticate -- the credential half login and the session path share
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_authenticate_returns_the_user_and_mints_nothing(auth_service, refresh_store):
+    # The whole point of this primitive: a session login gets an
+    # authenticated UserRecord WITHOUT a RefreshRecord being persisted for
+    # a token no client will ever hold.
+    registered = await auth_service.register("alice@example.com", "correct-horse-battery-staple")
+
+    user = await auth_service.authenticate("alice@example.com", "correct-horse-battery-staple")
+
+    assert user.id == registered.id
+    assert user.email == "alice@example.com"
+    assert refresh_store.all_records() == []
+
+
+@pytest.mark.asyncio
+async def test_authenticate_normalizes_email_like_login(auth_service):
+    await auth_service.register("alice@example.com", "correct-horse-battery-staple")
+    user = await auth_service.authenticate("  Alice@Example.COM  ", "correct-horse-battery-staple")
+    assert user.email == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_authenticate_rejects_an_unknown_email(auth_service, core_mod):
+    with pytest.raises(core_mod.InvalidCredentials):
+        await auth_service.authenticate("nobody@example.com", "any-password")
+
+
+@pytest.mark.asyncio
+async def test_authenticate_rejects_a_wrong_password_identically(auth_service, core_mod):
+    await auth_service.register("alice@example.com", "correct-horse-battery-staple")
+
+    with pytest.raises(core_mod.InvalidCredentials) as wrong_password:
+        await auth_service.authenticate("alice@example.com", "not-the-password")
+    with pytest.raises(core_mod.InvalidCredentials) as unknown_email:
+        await auth_service.authenticate("nobody@example.com", "not-the-password")
+
+    # Same user-enumeration defense login has always had -- asserted on the
+    # message, since that is what reaches a caller.
+    assert str(wrong_password.value) == str(unknown_email.value)
+
+
+@pytest.mark.asyncio
+async def test_login_is_authenticate_plus_a_mint(auth_service, refresh_store, monkeypatch):
+    # Guards against the two implementations drifting back apart: login
+    # must route its credential checking THROUGH authenticate, not repeat
+    # it. Asserted by spying on authenticate and confirming login used it.
+    await auth_service.register("alice@example.com", "correct-horse-battery-staple")
+    calls = []
+    real_authenticate = auth_service.authenticate
+
+    async def spy(email, password):
+        calls.append((email, password))
+        return await real_authenticate(email, password)
+
+    monkeypatch.setattr(auth_service, "authenticate", spy)
+    pair = await auth_service.login("alice@example.com", "correct-horse-battery-staple")
+
+    assert calls == [("alice@example.com", "correct-horse-battery-staple")]
+    assert pair.access and pair.refresh
+    # ...and the mint half really did happen.
+    assert len(refresh_store.all_records()) == 1
