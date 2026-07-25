@@ -25,7 +25,8 @@ Size the watchdog to the work — don't pick one global number. A build step run
 ## Anti-patterns
 - **Short-interval polling of harness-tracked work.** Wasteful, and a real cost driver — the completion notification already does this job for free.
 - **Unbounded blocking waits.** The passive-wait trap: if the worker stalls, the conductor stalls with it, indefinitely.
-- **Re-dispatching a stalled worker without stopping it first.** This puts two build agents on the one feature branch and violates the coding-session "one build agent at a time" rule. Always stop, then re-dispatch — never both at once.
+- **Re-dispatching a stalled worker without stopping it first.** This puts two build agents in one working tree and violates the "one writer per working tree" rule. Always stop, then re-dispatch — never both at once.
+- **Dispatching a wave one worker per turn.** Workers meant to run concurrently go out in a single message; otherwise you've written sequential execution with extra overhead (`${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md`).
 
 ## Portability
 The pattern is: dispatch → time-boxed liveness check → stop-and-re-dispatch. That's the part that travels to any harness. Concrete tool names are the mapping onto *this* harness, not the definition:
@@ -36,4 +37,6 @@ The pattern is: dispatch → time-boxed liveness check → stop-and-re-dispatch.
 - Stopping a stalled worker → `TaskStop`.
 
 ## See also
+`${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — which workers may run at the same time, and the worktree isolation that makes it safe. This doc governs how you watch each of them.
+
 `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md` — specifically "Isolate heavy exploration in subagents." That rule tells you when to spawn a subagent; this doc governs how you watch the ones it tells you to spawn.

@@ -24,7 +24,8 @@ Governing idea: **context is the budget, and the repository is the memory.** Eve
 ## Isolate heavy exploration in subagents
 - A bounded investigation (trace a bug, survey how a pattern is used across the repo, research an approach) runs in a **subagent** with its own context window and returns a short result. The main thread gets the conclusion, not the search.
 - Natural fits: the review step, debugging investigation, and any "go find out X" that would otherwise flood the main context.
-- See also: `${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md` for how to watch the subagents this rule tells you to spawn — active, backstop-only cadence rather than polling.
+- Independent investigations run **concurrently**, dispatched in one message — read-only work can't collide, so serializing it just costs wall-clock time.
+- See also: `${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md` for how to watch the subagents this rule tells you to spawn — active, backstop-only cadence rather than polling — and `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` for deciding which of them may run at the same time.
 
 ## Persistent project context (the biggest recurring saver)
 - A lean, high-signal **CLAUDE.md** per repo caches the stable facts every skill would otherwise re-derive: stack and versions, project layout, the commands to run tests/lint/build, and key conventions. This stops every task from re-paying detection.

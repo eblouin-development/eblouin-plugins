@@ -61,11 +61,23 @@ rejected, when the choice isn't obvious.
 ## Step-by-step breakdown
 An ordered list of concrete, reviewable steps. Each step names what
 changes (which files/modules/endpoints), and is small enough to verify on
-its own. Note dependencies between steps and anything parallelizable. This
+its own. This
 is the heart of the plan and the build agent's checklist. The whole list
 should land as ONE reviewable PR — if it can't (roughly a thousand-plus
 changed lines, or several unrelated subsystems), say so and propose
 splitting the work into separate issues instead.
+
+## Execution plan (dependencies & parallel tracks)
+The step list in dependency order rather than narrative order, per
+${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md. For each step, what it
+actually depends on (another step's output — a contract, a migration, a
+type) and which files it touches. Group steps with no dependency path
+between them and no file overlap into parallel tracks, and name the join
+points where tracks must converge. Pull a small unblocking step (an API
+contract, a schema) forward when it opens up tracks. State it compactly,
+e.g. `Track A: 1 → 2 → 4 | Track B: 3 → 5 (needs A:2) | Join: 6`. If the
+work is genuinely a serial chain, say so — but say it because the graph
+says so, not because the list was written in that order.
 
 ## Risks & open questions
 Things that could go wrong, decisions that need the user's input, unknowns
