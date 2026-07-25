@@ -9,8 +9,8 @@ block, a recipe, a workflow, or the docs — follows the **`library-contribution
 skill (`.claude/skills/library-contribution/SKILL.md`). Invoke it whenever you
 are making, planning, or reviewing a change here. It covers where each kind of
 content lives, the conventions `scripts/validate_plugin.py` enforces, the
-`release:*` label every PR must carry, and the post-merge check that the version
-actually published.
+`release:*` label every PR must carry, and the fact that the merged version is
+the release — nothing runs after merge to fix it.
 
 Two rules from it that are easy to violate before reading it:
 

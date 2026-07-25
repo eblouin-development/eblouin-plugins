@@ -67,10 +67,11 @@ Don't discover these from a red CI run:
 
 ## The release contract
 
-**The bump lives in the PR.** Nothing writes to `main` after merge — `main`'s ruleset ("changes
-must be made through a pull request") stays absolute, with no bot commits and no bypass. The PR
-that changes the library is also the PR that raises its version; `release.yml` merely tags the
-merge commit with the version `main` already carries, so the bump and the tag can never disagree.
+**The bump lives in the PR, and the merged version is the release.** Nothing runs after merge and
+nothing writes to `main` — `main`'s ruleset ("changes must be made through a pull request") stays
+absolute, with no bot commits and no bypass. The PR that changes the library is also the PR that
+raises its version, so what you approve in the diff is exactly what consumers install on their next
+`/plugin marketplace update`.
 
 **Doing the bump — the last thing before you mark the PR ready:**
 
@@ -110,12 +111,20 @@ this is a one-line conflict rather than a rewrite.
 
 ## After the merge
 
-Confirm the **release** run went green and that the `vX.Y.Z` tag now exists — that tag is the
-published artifact consumers pin to. If the PR was `release:none`, the job logs "already tagged —
-nothing to release," which is the correct outcome, not a failure.
+There is **no release workflow** — no job bumps, tags, or pushes after a merge. The version on
+`main` is the published version the moment the PR lands, which is why the bump has to be right
+*before* you merge, not fixable after.
 
-If versions have drifted (merges that published nothing), reconcile deliberately in one PR and say
-so in the description; don't let the next bump paper over the gap silently.
+Two consequences worth holding onto:
+
+- **A wrong version can only be corrected by another PR.** Don't push a fix or a tag directly to
+  `main` to repair it.
+- **Nothing is tagged automatically.** If a particular release should be pinnable, tag the merge
+  commit by hand (`git tag v1.2.0 <sha> && git push origin v1.2.0`) — tag pushes aren't governed by
+  the branch ruleset. Rollback otherwise means pointing the catalog entry at a prior commit.
+
+If versions have drifted, reconcile deliberately in one PR and say so in the description; don't let
+the next bump paper over the gap silently.
 
 ## PR conventions
 
