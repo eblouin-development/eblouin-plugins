@@ -16,7 +16,9 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  # Job name is the check name — keep it `version-bump` so it matches the
+  # required-status-check instructions in README.md and the skill.
+  version-bump:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
