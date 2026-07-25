@@ -82,6 +82,24 @@ if isinstance(pj, dict):
     if author is not None and not (isinstance(author, dict) and author.get("name")):
         err("plugin.json: 'author' must be an object with a 'name'")
 
+# 2b. the three version fields must agree. The bump is written by hand in the
+#     PR (see .claude/skills/library-contribution/SKILL.md), so a half-applied
+#     bump — one file moved, the other not — is the likely mistake, and it ships
+#     a marketplace whose advertised version isn't what installs.
+if isinstance(pj, dict) and isinstance(mkt, dict):
+    pj_version = pj.get("version")
+    mkt_meta = mkt.get("metadata", {}).get("version")
+    entries = [p for p in (mkt.get("plugins") or []) if p.get("name") == pj.get("name")]
+    mkt_entry = entries[0].get("version") if entries else None
+    seen = {
+        "plugin.json version": pj_version,
+        "marketplace.json metadata.version": mkt_meta,
+        f"marketplace.json plugins[{pj.get('name')}].version": mkt_entry,
+    }
+    if len({v for v in seen.values() if v is not None}) > 1:
+        err("version mismatch — all three must agree: "
+            + ", ".join(f"{k}={v!r}" for k, v in seen.items()))
+
 # 3. every SKILL.md frontmatter must be valid YAML with name + description
 skills = sorted(glob.glob(os.path.join(PLUGIN, "skills", "*", "SKILL.md")))
 if not skills:

@@ -121,21 +121,18 @@ References are **per-library and version-aware**, loaded only when that library 
 
 The plugin is itself a project in the firm — improve it through the same loop, governed by the repo's own **`library-contribution`** skill (`.claude/skills/library-contribution/SKILL.md`), which any Claude instance invokes whenever a change here is made, planned, or reviewed:
 1. A change (new skill, edited reference, freshness fix) comes in as a **PR** to `eblouin-plugins`.
-2. CI validates; **you review and merge**.
-3. On merge, `release.yml` bumps the **semver** version (label the PR `release:major|minor|patch`, default patch) and tags it.
-4. Your installs pick it up on auto-update, or run `/plugin marketplace update`.
-5. **Confirm the release run went green** — a clean merge does not by itself mean a version published (see the branch-rule note below).
+2. **The PR carries its own version bump**, labelled `release:major|minor|patch` (or `release:none` for changes consumers never see). `version-bump.yml` checks the bump matches the label, on every push and every label change.
+3. CI validates; **you review and merge**.
+4. On merge, `release.yml` tags the merge commit with the version `main` already carries. Nothing is pushed to `main`.
+5. Your installs pick it up on auto-update, or run `/plugin marketplace update`.
 
 Roll back by pointing the catalog at a prior tag.
 
-### Branch rules and the release push
+### Why the bump lives in the PR
 
-`main` is governed by a ruleset requiring changes to go through a pull request. That rule applies to **every** pusher, including the release job — so its bump commit is rejected with `GH013: Repository rule violations found` unless its identity is on the ruleset's **bypass list**. `GITHUB_TOKEN` cannot be granted that bypass (a repo-role bypass doesn't apply to it), so `release.yml` mints a **GitHub App token** when one is configured:
+`main` is governed by a ruleset requiring every change to go through a pull request, and that rule applies to **every** pusher — including a release job. A workflow that bumped the version on `main` after merge would need a bypass (`GITHUB_TOKEN` cannot be granted one, so it would mean a GitHub App token and an entry on the ruleset's bypass list), and when that isn't in place the push is rejected with `GH013` and **nothing publishes even though the PR merged cleanly** — a silent failure from the PR's point of view.
 
-- A GitHub App installed on this repo with **Contents: write**, exposed as repo variable `RELEASE_APP_ID` and secret `RELEASE_APP_PRIVATE_KEY`.
-- That App added under Settings → Rules → Rulesets → the `main` ruleset → **Bypass list**.
-
-With both in place the release job pushes normally and the ruleset stays absolute for humans. Without them the job falls back to `GITHUB_TOKEN`, the push is rejected, and **nothing publishes even though the PR merged cleanly** — the workflow now fails loudly with that diagnosis rather than leaving it to be noticed later. The job also runs under a `release` concurrency group and rebase-retries the push, so two merges landing close together can't race, and it tags only after the push succeeds so the tag always names the commit that actually landed.
+Putting the bump in the PR removes the problem rather than working around it: `main` only ever changes through a reviewed pull request, no bot has write access to it, and the version is visible in the diff you approve. The release job's only job is to tag what merged, so the bump and the tag can't disagree. The cost is that two PRs bumping from the same base collide — the second fails the check and rebases, which is why the bump is the last thing you do before marking a PR ready.
 
 ---
 

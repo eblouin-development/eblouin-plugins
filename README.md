@@ -66,14 +66,18 @@ eblouin-plugins/
 │       ├── compatibility-matrix.md      # the keystone pinned version set every template block and component pins to
 │       └── _TEMPLATE.md                 # house format + metadata header
 ├── docs/adr/                            # numbered, immutable Architecture Decision Records (see project-docs.md)
+├── .claude/skills/
+│   └── library-contribution/SKILL.md    # house rules for changing THIS repo (layout, conventions, the release contract)
 ├── scripts/
-│   └── validate_plugin.py               # structural validator (manifests + SKILL.md frontmatter)
+│   ├── validate_plugin.py               # structural validator (manifests + SKILL.md frontmatter)
+│   └── check_version_bump.py            # checks a PR's version bump against its release:* label
 └── .github/
     ├── pull_request_template.md         # this repo's own PR template (plugin-specific gates)
     └── workflows/
         ├── validate.yml                     # runs the validator on every push/PR (merge gate)
         ├── template-tests.yml               # runs the template blocks' + catalog components' own test suites on every PR (merge gate)
-        ├── release.yml                      # semver bump + exact tag on merged PR
+        ├── version-bump.yml                 # every PR must carry the bump its release:* label implies (merge gate)
+        ├── release.yml                      # tags the merge commit with the version main already carries
         ├── freshness-audit.yml              # weekly: references, templates/components, recipes, the matrix, and doc drift gone stale → tracking issue
         └── coverage-audit.yml               # weekly: fleet libraries with no reference → PR (reads .github/fleet-repos.txt)
 ```
@@ -130,7 +134,7 @@ Version lives in `plugin.json` and `marketplace.json`. `release.yml` bumps it on
 python scripts/validate_plugin.py
 ```
 
-Make the `validate` job a **required status check** in branch protection so nothing merges without it. The workflow also runs the official `claude plugin validate` as a best-effort cross-check.
+Make the `validate` job a **required status check** in branch protection so nothing merges without it — and `version-bump` alongside it, since that's what enforces that each PR carries the version bump its `release:*` label implies (see `.claude/skills/library-contribution/SKILL.md`). The workflow also runs the official `claude plugin validate` as a best-effort cross-check.
 
 `validate.yml` is structural only — it never executes a single test. `template-tests.yml` is what actually runs the template blocks' and catalog components' own test suites: the FastAPI and Django backend blocks' pytest suites (`templates/backend/{fastapi,django}/tests/`, each via its own `pyproject.toml` + `uv sync`), the 6 backend + 9 security catalog components under `templates/components/{backend,security}/` (each an ephemeral `uv run --with <matrix-pinned deps> -- pytest`, per that component's README), and the frontend catalog component's vitest suite (`templates/components/frontend`, pnpm + vitest). Every suite runs pinned to `references/compatibility-matrix.md` — never floating latest — so a version bump can't silently start failing template tests without also updating the matrix. It path-filters to `templates/**` (plus itself and the matrix file) at the job level, not via a top-level workflow trigger filter — a PR that doesn't touch those paths gets every test job reported as **skipped**, not silently never-run, which is what lets it stay a required status check without blocking merges on unrelated PRs. The weekly schedule run always runs everything, unfiltered, as a drift backstop.
 

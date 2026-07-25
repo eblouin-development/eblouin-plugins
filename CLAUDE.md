@@ -14,10 +14,12 @@ actually published.
 
 Two rules from it that are easy to violate before reading it:
 
-- **Never hand-edit a version field** — `plugin.json` and `marketplace.json`
-  versions are written only by the release workflow.
-- **Every PR carries exactly one `release:major|minor|patch` label** — unlabeled
-  silently defaults to patch.
+- **The PR carries the version bump** — compute it from `main`'s current version
+  and write it into `plugin.json` and both version fields in
+  `marketplace.json`, as the last thing before marking the PR ready. Nothing
+  bumps it after merge.
+- **Every PR carries exactly one `release:major|minor|patch|none` label** — CI
+  checks the bump against it; there is no default.
 
 ## Pull requests
 

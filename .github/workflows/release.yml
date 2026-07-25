@@ -1,16 +1,14 @@
 name: release
 
-# Semver release for the plugin. On a merged PR, bump the version in
-# plugin.json and marketplace.json, commit, and tag. The bump level comes
-# from a PR label (release:major | release:minor | release:patch);
-# default is patch. Users pick the new version up via `/plugin marketplace update`.
+# Semver release for the plugin. The version bump itself is NOT made here — it
+# is carried by the pull request (see .claude/skills/library-contribution and
+# version-bump.yml, which enforces that the PR bumped correctly for its
+# release:* label). By the time this runs, main already has the new version.
 #
-# main is governed by a ruleset whose "require a pull request" rule applies to
-# every pusher, so this job's push needs a bypass. GITHUB_TOKEN cannot be given
-# one, so we mint a GitHub App token when the app is configured (repo variable
-# RELEASE_APP_ID + secret RELEASE_APP_PRIVATE_KEY, app on the ruleset's bypass
-# list). Without it the push is rejected with GH013 and nothing publishes — see
-# .claude/skills/library-contribution/SKILL.md.
+# All this job does is tag the merge commit with the version main now carries,
+# so the bump and the tag can never disagree. Nothing pushes to main, so main's
+# ruleset ("changes must be made through a pull request") stays absolute — no
+# bypass, no App token, no bot commits.
 
 on:
   pull_request:
@@ -20,91 +18,41 @@ on:
 permissions:
   contents: write
 
-# Two merges close together would otherwise race on the push to main.
+# Two merges close together would otherwise race on tag creation.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  tag:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Mint push token (GitHub App, if configured)
-        id: app-token
-        if: vars.RELEASE_APP_ID != ''
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          persist-credentials: true
 
-      - name: Determine bump level from PR labels
-        id: bump
-        env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: |
-          level=patch
-          echo "$LABELS" | grep -q 'release:major' && level=major
-          echo "$LABELS" | grep -q 'release:minor' && level=minor
-          echo "$LABELS" | grep -q 'release:patch' && level=patch
-          echo "level=$level" >> "$GITHUB_OUTPUT"
-
-      - name: Bump versions
+      - name: Read the version main now carries
         id: version
         run: |
-          PLUGIN=plugins/dev-lifecycle/.claude-plugin/plugin.json
-          MARKET=.claude-plugin/marketplace.json
-          cur=$(jq -r '.version' "$PLUGIN")
-          IFS='.' read -r MA MI PA <<< "$cur"
-          case "${{ steps.bump.outputs.level }}" in
-            major) MA=$((MA+1)); MI=0; PA=0 ;;
-            minor) MI=$((MI+1)); PA=0 ;;
-            patch) PA=$((PA+1)) ;;
-          esac
-          new="$MA.$MI.$PA"
-          jq --arg v "$new" '.version=$v' "$PLUGIN" > "$PLUGIN.tmp" && mv "$PLUGIN.tmp" "$PLUGIN"
-          jq --arg v "$new" '.metadata.version=$v | (.plugins[] | select(.name=="dev-lifecycle") | .version) |= $v' "$MARKET" > "$MARKET.tmp" && mv "$MARKET.tmp" "$MARKET"
-          echo "new=$new" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          v=$(jq -r '.version' plugins/dev-lifecycle/.claude-plugin/plugin.json)
+          echo "new=$v" >> "$GITHUB_OUTPUT"
+          echo "main is at v$v"
 
-      - name: Commit and tag
+      - name: Tag it
         env:
           NEW: ${{ steps.version.outputs.new }}
-          USED_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null; then
+            echo "::notice::v$NEW is already tagged — this PR carried no bump (docs-only or an out-of-band merge). Nothing to release."
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add plugins/dev-lifecycle/.claude-plugin/plugin.json .claude-plugin/marketplace.json
-          git commit -m "chore(release): v$NEW [skip ci]"
-
-          # Push the bump first; another merge may have landed while we ran, so
-          # rebase and retry before giving up.
-          pushed=""
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then pushed=1; break; fi
-            echo "push attempt $attempt rejected — refreshing main and retrying"
-            git pull --rebase origin main || break
-            sleep $((attempt * 5))
-          done
-
-          if [ -z "$pushed" ]; then
-            if [ "$USED_APP_TOKEN" != "true" ]; then
-              echo "::error::Version bump could not be pushed to main, and no release App token was configured. If the log above shows GH013, main's ruleset is rejecting the push: set the RELEASE_APP_ID variable and RELEASE_APP_PRIVATE_KEY secret, and add that App to the ruleset's bypass list. See .claude/skills/library-contribution/SKILL.md."
-            else
-              echo "::error::Version bump could not be pushed to main even with the release App token. Check that the App is on main's ruleset bypass list and still has Contents: write."
-            fi
-            exit 1
-          fi
-
-          # Tag only after the push succeeds, so the tag names the commit that
-          # actually landed (a rebase above would have changed its sha).
           # Exact plugin version tag (vX.Y.Z), for reproducibility and pinning.
           git tag "v$NEW"
           git push origin "refs/tags/v$NEW"
+          echo "::notice::Released v$NEW"

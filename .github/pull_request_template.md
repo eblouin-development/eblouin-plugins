@@ -17,13 +17,12 @@ should sanity-check rather than assume) — or "none" if there weren't any.
 - [ ] `python scripts/validate_plugin.py` passes with 0 warnings (paste output below if any warnings were fixed)
 - [ ] Every new/changed reference, template block, catalog component, or recipe has an updated `last-verified:` header
 - [ ] Every new skill's frontmatter `name` matches its directory name
-- [ ] A `release:major` / `release:minor` / `release:patch` label is set on this PR (see `release.yml`; default is patch if unset)
-- [ ] No hand-edited version fields — `plugin.json` / `marketplace.json` versions are written only by the release workflow
+- [ ] Exactly one `release:major` / `release:minor` / `release:patch` / `release:none` label is set on this PR
+- [ ] This PR carries the version bump the label implies, computed from `main`'s current version, in all three fields (`plugin.json`, `marketplace.json` `metadata.version`, and the `dev-lifecycle` entry) — or the version is untouched for `release:none`
 - [ ] Docs updated where relevant (root `README.md`, `docs/SETUP-AND-USAGE.md`, or an ADR for a significant decision)
 
-After merge, confirm the **release** run went green and that `main` has the new
-`chore(release): vX.Y.Z` commit and matching tag — a clean merge does not by itself
-mean a version published (see `.claude/skills/library-contribution/SKILL.md`).
+After merge, confirm the **release** run went green and the `vX.Y.Z` tag exists — the
+tag is the published artifact (see `.claude/skills/library-contribution/SKILL.md`).
 
 ## Validator output
 ```

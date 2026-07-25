@@ -1,6 +1,6 @@
 ---
 name: "library-contribution"
-description: "The house rules for changing THIS repository — the eblouin-plugins marketplace and its dev-lifecycle plugin. Use this skill WHENEVER a change to this library is being made or proposed: adding or editing a skill, a shared doctrine, a reference, a template block, a recipe, a workflow, a script, or the docs; reviewing someone else's change to it; or planning one (\"should this be a skill or a reference\", \"where does this go\", \"add a skill for X\", \"update the plugin\"). It covers where each kind of content lives, the frontmatter and header conventions the validator enforces, which docs must move with the change, and the release contract every PR must satisfy — the `release:*` label that drives the version bump, the post-merge check that the bump actually landed, and the branch-rule bypass it depends on. Not for work in projects that merely *use* the plugin — those use the lifecycle skills themselves."
+description: "The house rules for changing THIS repository — the eblouin-plugins marketplace and its dev-lifecycle plugin. Use this skill WHENEVER a change to this library is being made or proposed: adding or editing a skill, a shared doctrine, a reference, a template block, a recipe, a workflow, a script, or the docs; reviewing someone else's change to it; or planning one (\"should this be a skill or a reference\", \"where does this go\", \"add a skill for X\", \"update the plugin\"). It covers where each kind of content lives, the frontmatter and header conventions the validator enforces, which docs must move with the change, and the release contract every PR must satisfy — the version bump the PR itself must carry, the `release:*` label CI checks it against, and the post-merge tag that publishes it. Not for work in projects that merely *use* the plugin — those use the lifecycle skills themselves."
 ---
 
 # Contributing to this library
@@ -19,13 +19,12 @@ follows is what's specific to *this* one.
   warnings**. It's deterministic, needs no auth or network, and it catches exactly what Claude Code
   rejects at install time — invalid manifests and invalid `SKILL.md` frontmatter. A red validator is
   a broken install for every consumer, not a lint nit.
-- **Never hand-edit a version field.** `plugins/dev-lifecycle/.claude-plugin/plugin.json` and
-  `.claude-plugin/marketplace.json` carry the semver, and **only the release workflow writes them**.
-  A version bump in a feature PR collides with the workflow's own commit and desynchronizes the tag
-  history. If a version looks wrong, fix the release process, not the file.
+- **The PR carries the version bump.** Nothing bumps the version after merge — you write the new
+  version into both manifests as part of the change, and CI checks it against the PR's label. A PR
+  that ships something to consumers without a bump is incomplete. See "The release contract" below.
 - **Every PR carries exactly one `release:*` label.** `release:major` / `release:minor` /
-  `release:patch` — this is what the release workflow reads to decide the bump. Unlabeled defaults
-  to patch, which silently under-versions a feature. See "The release contract" below.
+  `release:patch`, or `release:none` for a change consumers never see. There is no default —
+  an unlabeled PR fails the `version-bump` check.
 - **Docs move with the change.** The layout tree in `README.md`, the feature summary in
   `docs/SETUP-AND-USAGE.md`, and an ADR in `docs/adr/` for a significant decision. A new shared
   doctrine or a new skill that isn't in the docs is invisible to the person deciding whether to use it.
@@ -61,14 +60,31 @@ Don't discover these from a red CI run:
   entry needs `name`, `source`, `version`, `description`.
 - Every path a skill references must exist — the validator cross-checks them, so a
   `${CLAUDE_PLUGIN_ROOT}/...` pointer to a file you haven't written yet is a hard error.
+- The three version fields (plugin manifest, marketplace metadata, marketplace plugin entry) must
+  all carry the same value — a half-applied bump is a hard error.
 - Template blocks: `versions-pinned-to:` must resolve to a real file.
 - References/templates/recipes: a `last-verified:` header, updated when you touch the content.
 
 ## The release contract
 
-Merging is what publishes. `.github/workflows/release.yml` runs on PR close, reads the `release:*`
-label, bumps both version files, commits `chore(release): vX.Y.Z [skip ci]` to `main`, and pushes
-the `vX.Y.Z` tag. Consumers pick it up on `/plugin marketplace update`.
+**The bump lives in the PR.** Nothing writes to `main` after merge — `main`'s ruleset ("changes
+must be made through a pull request") stays absolute, with no bot commits and no bypass. The PR
+that changes the library is also the PR that raises its version; `release.yml` merely tags the
+merge commit with the version `main` already carries, so the bump and the tag can never disagree.
+
+**Doing the bump — the last thing before you mark the PR ready:**
+
+1. Read the current version from `main` (not from your branch — it may be behind):
+   `git show origin/main:plugins/dev-lifecycle/.claude-plugin/plugin.json | jq -r .version`
+2. Decide the level (below) and compute the new version from *that* base.
+3. Write it in **all three** places, which must always agree:
+   - `plugins/dev-lifecycle/.claude-plugin/plugin.json` → `.version`
+   - `.claude-plugin/marketplace.json` → `.metadata.version`
+   - `.claude-plugin/marketplace.json` → the `dev-lifecycle` entry's `.version`
+4. Apply the matching `release:*` label to the PR.
+5. Run `python scripts/validate_plugin.py` (catches a half-applied bump) and, if you want the
+   exact CI check locally, `python scripts/check_version_bump.py --base <main's> --head <yours>
+   --level <level>`.
 
 **Choosing the level:**
 
@@ -78,35 +94,28 @@ the `vX.Y.Z` tag. Consumers pick it up on `/plugin marketplace update`.
   doctrine, a new template block or recipe, a workflow-behavior change consumers will notice.
 - `release:patch` — corrections that don't change what the library does: typos, clarifications,
   a reference refreshed to a new library version, a validator fix.
+- `release:none` — nothing reaches consumers: this repo's own CI, its PR template, its
+  `CLAUDE.md`, or this skill. The version must **not** move; CI enforces that too.
 
-**Set the label on the PR before merge.** Unlabeled defaults to patch — fine for a fix, wrong for
-anything in the first two rows, and not retroactively correctable without a manual tag.
+**What CI enforces** (`version-bump.yml`, re-run on every push *and* every label change):
 
-**The branch-rule dependency.** `main` is governed by a ruleset whose "Require a pull request
-before merging" rule applies to *every* pusher, so the release job's push is rejected with `GH013`
-unless its identity is on the ruleset's **bypass list**. `GITHUB_TOKEN` cannot be granted that
-bypass — a repo-role bypass doesn't apply to it — so the workflow mints a **GitHub App token**
-when the app is configured:
+- Exactly one `release:*` label — no default, no guessing.
+- The head version is exactly what the label implies, computed from the PR's own base.
+- All three version fields agree.
 
-- Repo variable `RELEASE_APP_ID` and secret `RELEASE_APP_PRIVATE_KEY`, from a GitHub App installed
-  on this repo with **Contents: write**.
-- That app added to Settings → Rules → Rulesets → the `main` ruleset → **Bypass list**.
-
-Without both halves the job falls back to `GITHUB_TOKEN`, the push is rejected, and **no version is
-published even though the PR merged cleanly**. That failure is silent from the PR's point of view,
-which is exactly why the post-merge check below exists.
+**Bump last, and expect the occasional rebase.** Two open PRs both bumping from the same base will
+collide — the second to merge fails the check with "base moved under you." That's the intended
+behavior: rebase, recompute from the new base, re-push. Because the bump is the last thing you do,
+this is a one-line conflict rather than a rewrite.
 
 ## After the merge
 
-A merged PR is not a published change. Confirm both:
+Confirm the **release** run went green and that the `vX.Y.Z` tag now exists — that tag is the
+published artifact consumers pin to. If the PR was `release:none`, the job logs "already tagged —
+nothing to release," which is the correct outcome, not a failure.
 
-1. The **release** run for that merge is green — not just `validate` and `changes`.
-2. `main` has a new `chore(release): vX.Y.Z` commit and the matching `vX.Y.Z` tag exists.
-
-If the run failed with `GH013: Repository rule violations found` on `refs/heads/main`, the bypass
-is the cause — fix the app/bypass configuration rather than pushing the bump by hand. If versions
-have already drifted (merges that published nothing), reconcile deliberately in one PR and say so
-in the description; don't let the next successful run paper over the gap silently.
+If versions have drifted (merges that published nothing), reconcile deliberately in one PR and say
+so in the description; don't let the next bump paper over the gap silently.
 
 ## PR conventions
 
@@ -120,4 +129,5 @@ in the description; don't let the next successful run paper over the gap silentl
 - Govern work in repos that merely *use* the plugin — those run the lifecycle skills themselves.
 - Replace `template-author` / `recipe-author` for authoring a block or recipe — it says where they
   go and what must ship with them; those skills own the format.
-- Authorize hand-editing versions or hand-pushing a bump to `main` to route around a failed release.
+- Authorize pushing anything directly to `main` — including a version bump or a tag fix — to route
+  around a failed check. `main` changes only through a pull request.

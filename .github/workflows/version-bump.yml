@@ -1,0 +1,74 @@
+name: version-bump
+
+# The bump is carried by the pull request, not by a bot commit on main, so this
+# is what keeps it honest: every PR must move the version exactly as far as its
+# release:* label says (or not at all, for release:none).
+#
+# Runs on label changes as well as pushes — relabelling a PR must re-check it,
+# otherwise a stale green would let a mislabelled bump through.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the release level from the PR labels
+        id: level
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          levels=$(echo "$LABELS" | jq -r '.[] | select(startswith("release:")) | sub("^release:"; "")' | sort -u)
+          count=$(echo "$levels" | grep -c . || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::This PR has no release:* label. Add exactly one of release:major, release:minor, release:patch, or release:none (see .claude/skills/library-contribution/SKILL.md)."
+            exit 1
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "::error::This PR has more than one release:* label ($(echo "$levels" | tr '\n' ' ')). Exactly one is required."
+            exit 1
+          fi
+          case "$levels" in
+            major|minor|patch|none) ;;
+            *) echo "::error::Unknown release label 'release:$levels'. Use release:major, release:minor, release:patch, or release:none."; exit 1 ;;
+          esac
+          echo "level=$levels" >> "$GITHUB_OUTPUT"
+
+      - name: Read base and head versions
+        id: versions
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          PLUGIN=plugins/dev-lifecycle/.claude-plugin/plugin.json
+          MARKET=.claude-plugin/marketplace.json
+          base=$(git show "$BASE_SHA:$PLUGIN" | jq -r '.version')
+          head=$(jq -r '.version' "$PLUGIN")
+          # Both files must agree on the head version — the PR writes them by
+          # hand, so a half-applied bump is the likely mistake.
+          mkt_meta=$(jq -r '.metadata.version' "$MARKET")
+          mkt_plugin=$(jq -r '.plugins[] | select(.name=="dev-lifecycle") | .version' "$MARKET")
+          if [ "$head" != "$mkt_meta" ] || [ "$head" != "$mkt_plugin" ]; then
+            echo "::error::Version files disagree — plugin.json=$head, marketplace metadata.version=$mkt_meta, marketplace dev-lifecycle entry=$mkt_plugin. All three must match."
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Check the bump matches the label
+        run: |
+          python3 scripts/check_version_bump.py \
+            --base "${{ steps.versions.outputs.base }}" \
+            --head "${{ steps.versions.outputs.head }}" \
+            --level "${{ steps.level.outputs.level }}"
