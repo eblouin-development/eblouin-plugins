@@ -119,13 +119,23 @@ References are **per-library and version-aware**, loaded only when that library 
 
 ## Maintaining the plugin
 
-The plugin is itself a project in the firm — improve it through the same loop:
+The plugin is itself a project in the firm — improve it through the same loop, governed by the repo's own **`library-contribution`** skill (`.claude/skills/library-contribution/SKILL.md`), which any Claude instance invokes whenever a change here is made, planned, or reviewed:
 1. A change (new skill, edited reference, freshness fix) comes in as a **PR** to `eblouin-plugins`.
 2. CI validates; **you review and merge**.
 3. On merge, `release.yml` bumps the **semver** version (label the PR `release:major|minor|patch`, default patch) and tags it.
 4. Your installs pick it up on auto-update, or run `/plugin marketplace update`.
+5. **Confirm the release run went green** — a clean merge does not by itself mean a version published (see the branch-rule note below).
 
 Roll back by pointing the catalog at a prior tag.
+
+### Branch rules and the release push
+
+`main` is governed by a ruleset requiring changes to go through a pull request. That rule applies to **every** pusher, including the release job — so its bump commit is rejected with `GH013: Repository rule violations found` unless its identity is on the ruleset's **bypass list**. `GITHUB_TOKEN` cannot be granted that bypass (a repo-role bypass doesn't apply to it), so `release.yml` mints a **GitHub App token** when one is configured:
+
+- A GitHub App installed on this repo with **Contents: write**, exposed as repo variable `RELEASE_APP_ID` and secret `RELEASE_APP_PRIVATE_KEY`.
+- That App added under Settings → Rules → Rulesets → the `main` ruleset → **Bypass list**.
+
+With both in place the release job pushes normally and the ruleset stays absolute for humans. Without them the job falls back to `GITHUB_TOKEN`, the push is rejected, and **nothing publishes even though the PR merged cleanly** — the workflow now fails loudly with that diagnosis rather than leaving it to be noticed later. The job also runs under a `release` concurrency group and rebase-retries the push, so two merges landing close together can't race, and it tags only after the push succeeds so the tag always names the commit that actually landed.
 
 ---
 
