@@ -37,6 +37,8 @@ The pattern is: dispatch → time-boxed liveness check → stop-and-re-dispatch.
 - Stopping a stalled worker → `TaskStop`.
 
 ## See also
+`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` — the push → CI → fix → review → fix loop this cadence backstops, including the CI watchdog (a CI run emits no completion notification at all) and the local fallback when CI is unavailable.
+
 `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — which workers may run at the same time, and the worktree isolation that makes it safe. This doc governs how you watch each of them.
 
 `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md` — specifically "Isolate heavy exploration in subagents." That rule tells you when to spawn a subagent; this doc governs how you watch the ones it tells you to spawn.

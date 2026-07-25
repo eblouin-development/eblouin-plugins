@@ -47,6 +47,7 @@ eblouin-plugins/
 │   │   ├── token-efficiency.md          # the efficiency doctrine every skill follows
 │   │   ├── worker-cadence.md            # how an orchestrator watches dispatched subagents (backstop cadence, not polling)
 │   │   ├── parallelization.md           # what work can run concurrently, and the worktree isolation that makes it safe
+│   │   ├── ci-convergence.md            # push → CI → fix → review → fix loop to green, with watchdogs and a CI-down fallback
 │   │   └── definition-of-done.md        # the shared merge-ready bar
 │   ├── templates/                       # golden-path starter kit: composable blocks + catalog components
 │   │   ├── <layer>/<name>/README.md     # a block (e.g. backend/fastapi) — composition contract (needs/exposes) + doc fragment
