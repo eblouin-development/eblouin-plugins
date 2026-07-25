@@ -77,7 +77,6 @@ eblouin-plugins/
         ├── validate.yml                     # runs the validator on every push/PR (merge gate)
         ├── template-tests.yml               # runs the template blocks' + catalog components' own test suites on every PR (merge gate)
         ├── version-bump.yml                 # every PR must carry the bump its release:* label implies (merge gate)
-        ├── release.yml                      # tags the merge commit with the version main already carries
         ├── freshness-audit.yml              # weekly: references, templates/components, recipes, the matrix, and doc drift gone stale → tracking issue
         └── coverage-audit.yml               # weekly: fleet libraries with no reference → PR (reads .github/fleet-repos.txt)
 ```
@@ -119,7 +118,7 @@ Both carry the same kind of metadata header as a reference (`last-verified`, `pr
 
 ## Releases (semver)
 
-Version lives in `plugin.json` and `marketplace.json`. `release.yml` bumps it on a merged PR based on a label — `release:major` / `release:minor` / `release:patch` (default patch) — then tags. Users only receive updates when the version bumps, so an in-progress push never destabilizes a working session. Roll back by pointing the catalog entry at a prior tag/commit.
+Version lives in `plugin.json` and `marketplace.json` (three fields, which must agree). **The PR carries its own bump** — you compute the new version from `main`'s current one and write it into the change, labelled `release:major` / `release:minor` / `release:patch`, or `release:none` for a change consumers never see. `version-bump.yml` gates every PR on that label matching the bump. Nothing bumps or tags after merge: `main` changes only through a reviewed pull request, so the merged version *is* the release. Users only receive updates when the version bumps, so an in-progress push never destabilizes a working session. Roll back by pointing the catalog entry at a prior commit (or tag one by hand at the point you want to keep). The full contract is in `.claude/skills/library-contribution/SKILL.md`.
 
 ## Owned vs guest repos
 

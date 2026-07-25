@@ -21,8 +21,9 @@ should sanity-check rather than assume) — or "none" if there weren't any.
 - [ ] This PR carries the version bump the label implies, computed from `main`'s current version, in all three fields (`plugin.json`, `marketplace.json` `metadata.version`, and the `dev-lifecycle` entry) — or the version is untouched for `release:none`
 - [ ] Docs updated where relevant (root `README.md`, `docs/SETUP-AND-USAGE.md`, or an ADR for a significant decision)
 
-After merge, confirm the **release** run went green and the `vX.Y.Z` tag exists — the
-tag is the published artifact (see `.claude/skills/library-contribution/SKILL.md`).
+There is no post-merge release job: the version this PR carries is published the
+moment it merges, and can only be corrected by another PR (see
+`.claude/skills/library-contribution/SKILL.md`).
 
 ## Validator output
 ```
