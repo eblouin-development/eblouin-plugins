@@ -41,4 +41,6 @@ The pattern is: dispatch → time-boxed liveness check → stop-and-re-dispatch.
 
 `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — which workers may run at the same time, and the worktree isolation that makes it safe. This doc governs how you watch each of them.
 
+`${CLAUDE_PLUGIN_ROOT}/shared/context-continuity.md` — a context handoff must not drop a live worker: record each one's task ID and watchdog in the continuation brief, and re-arm them on the other side.
+
 `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md` — specifically "Isolate heavy exploration in subagents." That rule tells you when to spawn a subagent; this doc governs how you watch the ones it tells you to spawn.
