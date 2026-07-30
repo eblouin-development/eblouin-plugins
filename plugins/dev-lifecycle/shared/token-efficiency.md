@@ -20,6 +20,7 @@ Governing idea: **context is the budget, and the repository is the memory.** Eve
 ## Distill at handoffs — the repo is the memory
 - State flows between steps through **durable artifacts**, not raw transcript: the plan lives in the issue, the change in the PR, the API shape in the contract, a decision in an ADR.
 - Hand off the distilled artifact (the contract, the acceptance criteria, the diagnosis) — not the exploration that produced it. This is what stops a long pipeline from accumulating context linearly.
+- The same rule applies to a session handing off **to itself** when its window fills: flush state to the issue and PR, write a continuation brief, reload the skills in play, and resume — see `${CLAUDE_PLUGIN_ROOT}/shared/context-continuity.md`.
 
 ## Isolate heavy exploration in subagents
 - A bounded investigation (trace a bug, survey how a pattern is used across the repo, research an approach) runs in a **subagent** with its own context window and returns a short result. The main thread gets the conclusion, not the search.

@@ -30,6 +30,8 @@ The firm runs the whole plan → build → review → merge loop through this sk
 - **Watch workers actively, don't wait passively.** A stalled or dropped subagent emits no completion signal, so a passive wait can leave it dead for the better part of an hour. Dispatch in the background and back every worker with a right-sized watchdog; catch stalls in minutes, never busy-poll. **A CI run needs its own watchdog too** — no completion notification is coming for it — so every push arms one, and a run that stays queued or silent past its window is treated as a stall, not something to keep waiting on. See `${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md`.
 - **Find the parallelism before you execute.** A plan's step list is written in narrative order, not dependency order. Before building, run the parallelization pass — dependency graph, file-overlap check, parallel tracks, join points — and run every track the graph allows concurrently. Sequence only where a real dependency, a shared file, or a safety rule demands it. Concurrent build workers get **separate worktrees**, never the same working tree (`${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md`).
 - **Route each subagent to the right model.** Reasoning-heavy stages (planning, plan-review, code-review) run on a stronger model; mechanical build/implementation runs on a cheaper one. Pass the model explicitly on every spawn (see "Model routing" below) — an unset model inherits the orchestrator's, which is the most expensive default and the main source of avoidable spend.
+- **Cross-check the plan against the open backlog before gate 1.** Every plan this session is about to build gets checked against the repo's open issues and PRs by a `sonnet` subagent — what it closes, what it partially addresses, what it duplicates, what it conflicts with — and the result is presented with the plan so the user approves against the real backlog (`${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`).
+- **Manage your own context; never run the window to the wall.** At ~75% of the context window the conductor hands off to itself at a step boundary: flush state to the issue and PR, refresh the continuation brief (the sticky comment on the draft PR), name the skills in play, compact, then reload those skills and resume at the recorded next action. This is routine maintenance — it does not stop the run, does not ask the user anything, and must not lose a live worker or the loop's round counters (`${CLAUDE_PLUGIN_ROOT}/shared/context-continuity.md`).
 
 ## Model routing
 
@@ -40,6 +42,7 @@ The session runs many subagents, and each is spawned with the `Agent` tool's `mo
 | **Orchestrator** (this conducting thread) | `opus` | Holds the plan, loop state, decision log, and gate decisions — reasoning-critical, and usually the session's own model already. |
 | **Planner** (`planning` / `product-planning`, step 1) | `opus` | Investigation and design quality set the ceiling for everything downstream; cheap here is expensive later. |
 | **Plan-review** (step 2) | `opus` | Judges whether a plan is actually buildable and what it glossed over — a judgment stage. |
+| **Issue cross-check** (step 2) | `sonnet` | Mechanical search-and-classify over the open backlog — no design judgment, and it runs on every plan (`${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`). |
 | **Build / implementation** (`frontend`, `backend`, `testing`, `data`, `debugging`, `devops`, `infrastructure`; step 4 and every fix round) | `sonnet` | Mechanical execution against a concrete plan — Sonnet builds to spec well and is where the bulk of tokens are spent, so this is the biggest saving. |
 | **Code-review** (per-step review, step 5; final whole-PR review, step 7) | `opus` | Correctness/security judgment — catching one real bug outweighs the token savings (`${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md`). |
 
@@ -48,6 +51,15 @@ Rules of thumb:
 - **Default reasoning/judgment stages to `opus`, execution stages to `sonnet`.** The split above is the default; follow it unless the user says otherwise.
 - **The user can override per session.** If the user asks to run a stage cheaper (e.g. "review on Sonnet this time" for a low-risk change) or richer, honor it for that session — the defaults are a starting point, not a lock.
 - **Match the model to the risk, not the file count.** A large but mechanical build is still `sonnet`; a small but subtle security-sensitive change may warrant keeping review (or even build) on `opus`. When a build step is unusually tricky, it's fine to raise that one spawn to `opus`.
+
+## Context self-management
+
+A session outlives its context window, so the conductor manages that window itself rather than being truncated by it. The doctrine is `${CLAUDE_PLUGIN_ROOT}/shared/context-continuity.md`; what it means here:
+
+- **The continuation brief is a sticky comment on the draft PR**, refreshed in place at every step boundary — issue/PR/branch, per-track status, live workers with their task IDs and watchdogs, the CI-green/review-clean loop state and its round counters, decisions since the last refresh, open findings, checkpoints passed and ahead, and the single next action. Keeping it current is a few edited lines; it's what makes the handoff nearly free.
+- **At ~75% of the window, hand off to yourself** — at a boundary (a step ticked, a wave integrated), never mid-integration. Flush to the repo, refresh the brief, name the skills in play (`coding-session` plus the shared doctrines governing the run, plus any project `CLAUDE.md` conventions), compact, then **re-invoke those skills**, re-read the brief, re-arm a watchdog per live worker, and resume at the recorded next action.
+- **It is not a mid-flight stop.** A handoff is invisible to the user: no check-in, no "where were we", no re-planning of work already done. Step 6's rule stands — only a declared checkpoint or a genuine escalation reaches the human. A handoff that *can't* complete (state won't push, a worker won't drain) is the exception, and that one escalates.
+- **The brief is also the interruption plan.** If the session dies outright, whoever picks the feature up — another session, or you tomorrow — resumes from the branch, the issue, the PR, and that comment. That's the same "the repo is the memory" rule, made survivable at the window boundary.
 
 ## Workflow
 
@@ -64,6 +76,12 @@ Either way you arrive at **one feature** with a step-by-step plan concrete enoug
 
 Before it becomes the build brief, the plan must be sound. Spin up a short **plan-review subagent** on **`opus`** (brief it with the plan + the relevant part of the codebase) to sanity-check it for completeness, feasibility, missing edge cases, and blast radius the plan glossed over — a cheap pass that catches "this plan can't actually be built as written" before a build agent discovers it the expensive way. Fold its findings back into the plan.
 
+Dispatch an **issue cross-check subagent** on **`sonnet`** in the *same message* — both passes are read-only and independent, so they run concurrently and cost one wall-clock window between them. It sweeps the repo's open issues and open PRs for what this plan **closes**, **partially addresses**, **duplicates**, or **conflicts with**, and reports a compact ranked list; the full brief is `${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`. If the planner already ran this check in step 1 (it's `planning`'s own step 4), reuse its `## Related issues` section rather than repeating the sweep — re-run only when the plan changed materially since. Fold the result into the plan as a **`## Related issues`** section (or "None found"). It is read-only — it never comments on or closes another issue; the session acts on the findings only after gate 1:
+
+- **Closes** hits become `Closes #n` links on the issue filed in step 3.
+- **Duplicate** hits go to the user *before* filing — the session must not open a second issue for work already tracked.
+- **Conflicts** are presented at the gate as an explicit decision. A plan that contradicts another open issue or collides with an in-flight PR is not something to resolve unilaterally.
+
 Then run the **parallelization pass** over the step list (`${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md`) — this is a default part of verifying a plan, not an optimization the user has to ask for. Work out which steps genuinely depend on another step's output, which would collide on the same files, and which are merely listed in a convenient order; group the rest into parallel tracks with explicit join points. If one small step (an API contract, a schema, a shared type) would unblock several others, pull it forward so the tracks can open earlier. Record the resulting **execution plan** — tracks, dependencies, joins — in the plan so it lands on the issue and the user can see what will be built concurrently.
 
 Then make sure the plan carries the **autonomy contract** — the two things that define where the human will and won't be involved:
@@ -71,13 +89,13 @@ Then make sure the plan carries the **autonomy contract** — the two things tha
 - **Declared checkpoints.** The plan explicitly lists any point where the session must stop for the user mid-build: a manual test gate (something only a person can verify — "check the OAuth flow against the real provider before we build on it"), a known decision point ("pick A or B once we see the query timings"), or anything irreversible or externally visible (a migration on shared data, a deploy). **The default is zero.** If the plan declares none, the session runs from approval to final sign-off without stopping.
 - **The size guard.** If the feature won't fit one reviewable PR, the plan must say so here and propose the split (see Core rules). Don't let an unreviewable diff be discovered at gate 2.
 
-Present the verified plan — including its execution plan and its checkpoints (or "none") — to the user and **iterate to explicit approval**. This is gate 1: the user is approving *what* gets built **and** *where they'll be interrupted*. Do not file anything or start a build until they approve. If they request changes, revise and re-present.
+Present the verified plan — including its execution plan, its related-issues findings, and its checkpoints (or "none") — to the user and **iterate to explicit approval**. This is gate 1: the user is approving *what* gets built **and** *where they'll be interrupted*. Do not file anything or start a build until they approve. If they request changes, revise and re-present.
 
 ### 3. Record the issue and mark it in-progress
 
-On approval, file/update the work in GitHub in the right shape (this is `planning`'s step-5 behavior — reuse it, but the session performs it so it controls the trigger):
+On approval, file/update the work in GitHub in the right shape (this is `planning`'s step-6 behavior — reuse it, but the session performs it so it controls the trigger):
 
-- **Single feature/fix** → **one issue**: title from the goal, body is the plan (including the declared checkpoints), step-by-step as a `- [ ]` task list. The steps live as checkboxes on this one issue — do **not** file an issue per step. If it belongs to an epic, register it as a native **sub-issue** and add the `Epic: #<n>` marker + this issue's number on the epic's checklist line, so the epic reconciles on merge (see `planning`/`product-planning`).
+- **Single feature/fix** → **one issue**: title from the goal, body is the plan (including the declared checkpoints and the `## Related issues` findings from step 2), step-by-step as a `- [ ]` task list. Carry any **closes** hits into the PR body as `Closes #n` alongside the feature issue, so approving the cross-check actually reconciles the backlog on merge. The steps live as checkboxes on this one issue — do **not** file an issue per step. If it belongs to an epic, register it as a native **sub-issue** and add the `Epic: #<n>` marker + this issue's number on the epic's checklist line, so the epic reconciles on merge (see `planning`/`product-planning`).
 - **Whole product / large effort** → epic + milestones + per-stage sub-issues (that's `product-planning`); then this session builds the stages one feature at a time, each through its own full pass of this loop.
 - **Picking up an existing issue** → update it in place rather than filing a duplicate.
 
@@ -102,7 +120,7 @@ Work the **execution plan** from step 2, not the raw step list: run each wave of
 Brief the subagent with: the issue number, this step's slice of the plan and its acceptance criteria, the specific skill to invoke, the **feature branch** name, and the bar — `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md`. Instruct it to:
 
 - Build **this step only**, as commits on the shared feature branch, meeting all benchmarks — meaningful tests at the right levels, lint/type-check/tests green **locally in the container**, security clean, docs moved with the code. **Push only once that local gate passes** — pushing to let CI find what a local run catches wastes a full CI cycle per mistake. It does **not** open a per-step PR.
-- **First step to land on the feature branch only** (exactly one worker per feature, never a parallel sibling): open the feature's **draft PR** when green — `Closes #<issue>` in the body so the issue (and the epic box) reconciles on merge, a summary of the feature, an empty `## Decision log` section for the conductor to maintain, and — if this repo's own `CLAUDE.md` documents a PR-ping convention (e.g. a `cc @<owner>` line) — follow it so the owner is notified. **Draft status is the signal that the PR is not yet for the human**; it also gives the user a live window they *can* glance at, and CI runs on every push.
+- **First step to land on the feature branch only** (exactly one worker per feature, never a parallel sibling): open the feature's **draft PR** when green — `Closes #<issue>` in the body so the issue (and the epic box) reconciles on merge (plus a `Closes #n` for any issue the step-2 cross-check found this feature fully delivers), a summary of the feature, an empty `## Decision log` section for the conductor to maintain, and — if this repo's own `CLAUDE.md` documents a PR-ping convention (e.g. a `cc @<owner>` line) — follow it so the owner is notified. **Draft status is the signal that the PR is not yet for the human**; it also gives the user a live window they *can* glance at, and CI runs on every push.
 - Report back what it built, the commits it pushed, and anything it couldn't resolve.
 
 **Running tracks concurrently.** Never two build agents in one working tree — that rule is absolute. Concurrent tracks are therefore run in **separate git worktrees** (spawn with `isolation: "worktree"`), each branched off the feature branch, and each briefed with the files/modules it owns and the sibling track's files it must not touch. Dispatch a wave's workers in a **single message** so they actually run at once, each with its own watchdog (`${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md`). When a track returns, integrate it onto the shared feature branch **one at a time**, resolving any conflicts in the conductor: parallel build, serial integration. Steps within a single track stay sequential on that track's tree.
@@ -116,7 +134,7 @@ After each step's build returns, spawn a review subagent on **`opus`**, briefed 
 Reviews are read-only, so they parallelize freely: review a completed step while the next independent step builds, and review a wave's tracks concurrently — one review subagent per track's diff, dispatched together.
 
 - **Blocker/high findings** → spawn a build subagent (**`sonnet`**) to fix them on the feature branch, then re-review. Findings in different files can be fixed by concurrent workers under the worktree rule; findings in the same file go to one worker. Bound it: after ~2 rounds without convergence, or the moment a finding needs a human decision, escalate (step 6).
-- **Clean** → tick the step's checkbox on the feature issue, append any judgment calls to the PR's decision log, push, and advance to the next step (back to step 4).
+- **Clean** → tick the step's checkbox on the feature issue, append any judgment calls to the PR's decision log, refresh the continuation brief (`${CLAUDE_PLUGIN_ROOT}/shared/context-continuity.md`), push, and advance to the next step (back to step 4). This boundary is also where a context handoff goes if the window is near 75% — state is clean and nothing is mid-integration.
 
 **Every push is watched.** Once the draft PR exists, each push runs CI. Arm a CI watchdog on it (`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md`) and don't advance a step past a red run: triage it, delegate the fix, push again. A step's box is ticked when its review is clean *and* the run on that commit is green.
 
@@ -178,6 +196,7 @@ Then **stop and wait**. This is gate 2; the session does not merge. If the user 
 - **Dispatch a wave in one message.** Workers meant to run concurrently must be spawned in a single assistant turn — one spawn per turn is sequential execution wearing a parallel costume.
 - **A fix worker gets the evidence, not the symptom.** Brief it with the failing job's name, the relevant log excerpt, and the command that reproduces the failure in the container — not "CI is red." Fix workers are the same build skills on **`sonnet`**, and they push only once the local gate passes.
 - **The review worker reviews; the conductor routes.** When `code-review` runs as this session's review worker it posts its findings and returns them — it doesn't drive its own fix loop. The conductor decides what's blocking and dispatches the fix, so one thread owns the loop and its round budget.
+- **The cross-check worker searches, it doesn't act.** Brief it with the plan and `${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`, and tell it explicitly that it may not comment on, label, close, or open an issue. It returns a ranked list; the conductor decides what becomes a `Closes` link, what goes to the user, and what gets dropped.
 - **Fan out read-only investigation freely.** Codebase surveys, prior-art checks, and "how is X used here" questions can't collide; run them concurrently and keep their output out of the conductor's context.
 
 ## What this skill does NOT do
@@ -192,3 +211,6 @@ Then **stop and wait**. This is gate 2; the session does not merge. If the user 
 - Stop the loop because CI is down — the gate moves into the container and the loop continues, stated plainly on the PR.
 - Inline the build or the review into the conducting thread instead of spawning a subagent for each.
 - Open a duplicate issue when picking up existing work — update in place.
+- Take a plan to gate 1 without saying what it closes, overlaps, duplicates, or conflicts with in the open backlog — or let the cross-check worker write to another issue.
+- Run its context window to the wall, or ask the user to help it recover — the handoff at 75% is the session's own job and is invisible to the human.
+- Resume from a handoff by re-planning, re-reviewing finished steps, or dropping a worker it had already dispatched.

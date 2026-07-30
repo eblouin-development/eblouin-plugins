@@ -14,6 +14,7 @@ Planning is the entry point to the pipeline: the approved plan becomes a GitHub 
 - **Investigate, don't implement.** Read and search the codebase as needed. Do not write feature code, scaffolding, or migrations. Tiny illustrative snippets (a few lines showing an interface shape or a data model) are fine when they make the plan clearer; full implementations are not.
 - **Work context-efficiently.** Context is the budget. Locate with search before reading; read the specific spans that change the plan, not whole files or directories; state reasonable inferences as assumptions rather than verifying everything. See `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md`.
 - **Stop for approval.** Present the plan and iterate on feedback. Do NOT file the issue until the user explicitly approves. The plan is the deliverable; the user's approval is the trigger.
+- **Check the plan against the open backlog.** Every plan is cross-checked against the repo's open issues and PRs by a `sonnet` subagent before the user is asked to approve it, so what the work closes, duplicates, or conflicts with is on the table at the gate rather than discovered after merge (`${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`).
 - **Detailed but concise.** Every section earns its place. A senior engineer — or the build agent — should be able to read the plan and start building. Cut throat-clearing, restating the obvious, and filler.
 
 ## Workflow
@@ -79,6 +80,12 @@ e.g. `Track A: 1 → 2 → 4 | Track B: 3 → 5 (needs A:2) | Join: 6`. If the
 work is genuinely a serial chain, say so — but say it because the graph
 says so, not because the list was written in that order.
 
+## Related issues
+What this plan touches in the repo's open backlog, from the cross-check in
+step 4: issues it closes, partially addresses, duplicates, or conflicts
+with — `#n — bucket — one line — recommended action`. State "None found"
+when nothing intersects; omit the section only when there's no GitHub.
+
 ## Risks & open questions
 Things that could go wrong, decisions that need the user's input, unknowns
 that couldn't be resolved cheaply, and anything that would change the plan
@@ -100,15 +107,21 @@ include. These become the build agent's target and the testing skill's
 checklist.
 ```
 
-### 4. Review with the user and get approval (the gate)
+### 4. Cross-check the plan against the open backlog
 
-Present the plan in the conversation. Discuss, adjust, and iterate on the user's feedback until they **explicitly approve**. This is the back-and-forth, and it may take several rounds. Do not file anything or trigger the build during this step. If the user requests changes, revise and re-present. Only explicit approval moves to step 5.
+A plan is written against the code, but it lands in a repo that already has a backlog. Before the user sees it, dispatch a **`sonnet` subagent** to sweep the repo's **open** issues and PRs for what this plan **closes**, **partially addresses**, **duplicates**, or **conflicts with**, and fold its ranked list into the plan's `## Related issues` section. The brief and the bucket definitions are `${CLAUDE_PLUGIN_ROOT}/shared/issue-cross-check.md`.
 
-### 5. Record the approved plan
+It's read-only and cheap: it never comments on, labels, closes, or opens an issue, and it runs concurrently with any other verification pass rather than delaying the draft. Two findings change what happens next — a **duplicate** goes to the user before anything is filed (step 6 must not open a second issue for tracked work), and a **conflict** is raised at the gate as an explicit decision rather than resolved unilaterally. No GitHub, or nothing intersecting: one line saying so, and move on.
+
+### 5. Review with the user and get approval (the gate)
+
+Present the plan in the conversation. Discuss, adjust, and iterate on the user's feedback until they **explicitly approve**. This is the back-and-forth, and it may take several rounds. Do not file anything or trigger the build during this step. If the user requests changes, revise and re-present. Only explicit approval moves to step 6.
+
+### 6. Record the approved plan
 
 On approval, and only then:
 
-- **File a GitHub issue.** Title from the goal; body is the plan; render the step-by-step breakdown as a markdown task list (`- [ ]`) so progress can be checked off. Prefer `gh issue create`; fall back to the GitHub API. For a large effort, a tracking issue with linked sub-issues is fine, but a single well-structured issue is the default. This shape mirrors the repo's `.github/ISSUE_TEMPLATE/feature.yml` (or `bug.yml` for a fix) issue form — someone filing manually through the GitHub UI ends up with the same structure, so hand-filed and skill-filed issues stay in sync.
+- **File a GitHub issue.** Title from the goal; body is the plan (including its `## Related issues` findings); render the step-by-step breakdown as a markdown task list (`- [ ]`) so progress can be checked off. Where the cross-check found an existing issue this work fully delivers, note it so the build's PR carries a `Closes #n` for it — and where it found a **duplicate**, don't file at all until the user has said whether to use the existing issue instead. Prefer `gh issue create`; fall back to the GitHub API. For a large effort, a tracking issue with linked sub-issues is fine, but a single well-structured issue is the default. This shape mirrors the repo's `.github/ISSUE_TEMPLATE/feature.yml` (or `bug.yml` for a fix) issue form — someone filing manually through the GitHub UI ends up with the same structure, so hand-filed and skill-filed issues stay in sync.
 - **If this issue belongs to an epic** (a `product-planning` roadmap stage, or any tracking issue), link it so the epic reconciles itself when the work merges:
   - Register it as a native **sub-issue** of the epic (`gh api` / GitHub's sub-issues endpoint, or the `sub_issue_write` tool) — this alone moves the epic's progress bar when the issue closes, no automation required.
   - Add an `Epic: #<n>` marker line to this issue's body, and make sure the epic's checklist line for this stage carries this issue's number, e.g. `- [ ] Stage 3 — Auth (#<this-issue>)`. That pair is what the `epic-checkoff` workflow keys on to flip `- [ ]` → `- [x]` in the epic when the issue closes (via the merged PR's `Closes #`). Without the marker and the number on the line, the box won't tick.
@@ -116,7 +129,7 @@ On approval, and only then:
 
 Filing the issue is recording and delegating, not implementing — this does not violate "investigate, don't implement." Planning still writes no code; the build agent does.
 
-### 6. Hand off
+### 7. Hand off
 
 Share the issue link and a one-line summary.
 
@@ -127,5 +140,6 @@ Share the issue link and a one-line summary.
 - Write production code, scaffolding, config, or migrations.
 - Run code, tests, or commands that mutate state — beyond creating the issue once the user has approved.
 - File the issue or trigger the build before the user approves the plan.
+- Present a plan without saying what it closes, duplicates, or conflicts with in the open backlog — or let the cross-check write to another issue.
 - Read whole files or directories when a targeted search and a specific span would do.
 - Pad the plan with generic best-practice boilerplate not specific to this work.
