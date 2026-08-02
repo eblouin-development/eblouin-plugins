@@ -9,12 +9,19 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `ready_for_review` makes flipping a draft to ready trigger the gate; the
+    # job-level draft guard below is what keeps it off drafts (`synchronize`
+    # fires on every push to one). Drafts are gated in the container instead —
+    # plugins/dev-lifecycle/shared/ci-convergence.md.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 jobs:
   validate:
+    # Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -17,6 +17,11 @@ Closes #
 What was run, and the results (unit/integration/e2e, manual verification). A
 fixed bug should point at its regression test.
 
+CI gates run on ready-for-review PRs only, so while this was a draft the checks
+ran in the container — say which ones, and name anything the container couldn't
+run (a job needing a secret, a service, or a runner matrix) that the CI run
+started by the flip is the first to cover.
+
 ## Security
 Security-relevant considerations this PR touches (auth/authorization on
 protected routes, input validation, secrets, dependency changes) and how the

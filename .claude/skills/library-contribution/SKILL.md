@@ -126,6 +126,23 @@ Two consequences worth holding onto:
 If versions have drifted, reconcile deliberately in one PR and say so in the description; don't let
 the next bump paper over the gap silently.
 
+## Draft until it's verified — CI runs on ready only
+
+This repo's PR gates (`validate`, `version-bump`, `template-tests`) skip **draft** pull requests and
+run when the PR is flipped to **ready for review**. The contract that follows from that is the
+plugin's own (`plugins/dev-lifecycle/shared/ci-convergence.md`), applied here:
+
+- **While the PR is a draft, the container is the gate.** Run `python scripts/validate_plugin.py`
+  (0 warnings), the template suites if you touched `templates/**`, `actionlint` on any workflow you
+  changed, and `python scripts/check_version_bump.py --base <main's> --head <yours> --level <level>`
+  once the bump is in. Repeat until they're all green locally.
+- **Flip to ready only when that's green** and the review is clean. The flip is both the "this is
+  for you" signal and what starts CI, so it's a claim that the run will pass — not a way to find out.
+- **Then watch the run.** Red because of the change (a validator error, a failing template test, a
+  bump that doesn't match the label) → back to draft, fix, re-verify locally, flip again. Red for a
+  reason the change didn't cause — Actions usage or concurrency limits, a runner outage, a rate
+  limit — → leave it ready and tell the owner what's failing and why it isn't the diff.
+
 ## PR conventions
 
 - Fill `.github/pull_request_template.md` — summary, what changed/why, the decision log (judgment

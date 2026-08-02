@@ -1,122 +1,208 @@
 # CI & review convergence
 
-The canonical reference for taking a pushed branch to **CI green and review clean**, without the
-human doing the shuttling. Orchestrating skills point here; a coding session runs this loop by
+The canonical reference for taking a feature branch to **verified green and review clean**, without
+the human doing the shuttling. Orchestrating skills point here; a coding session runs this loop by
 default on every feature.
 
 Governing idea: **the orchestrator owns the loop, workers own the fixes.** Work is built on a
-branch in the container, pushed when the worker believes it's ready, and from that moment the
-conducting thread is responsible for driving it to green — watching the run, triaging failures,
-delegating fixes, and re-entering the loop — until CI passes and the review has nothing blocking
-left. The human is not the message bus between CI and the fixer.
+branch in the container, and from the first commit the conducting thread is responsible for driving
+it to green — running the gate, triaging failures, delegating fixes, and re-entering the loop —
+until the change is verified and the review has nothing blocking left. The human is not the message
+bus between the gate and the fixer.
 
-Two failure modes this exists to prevent: a red branch sitting because everyone assumed someone
+Two failure modes this exists to prevent: a broken branch sitting because everyone assumed someone
 else was watching, and a loop that spins forever on a failure it can't fix. Both are handled by
 the same discipline — watchdogs on everything, and a bounded number of rounds before escalation.
+
+## The draft/ready contract
+
+The firm's repos run CI **only on pull requests that are ready for review**. That makes the PR's own
+state the boundary between the session's workspace and the human's:
+
+| PR state | Whose it is | What verifies the code | What the state means |
+| --- | --- | --- | --- |
+| **Draft** | the session's | the **local gate** — the pipeline's own checks, run in the container | "not for you yet"; no CI runs, no CI minutes burned |
+| **Ready** | the human's | **CI on GitHub**, on top of the local gate | "this is for you"; CI is running and should be green |
+
+So the loop has two halves, not one. The session converges the branch **locally** while the PR is a
+draft — build, gate, review, fix, repeat — and flips to ready only when the branch is green locally
+*and* the review is clean. **Flipping is what starts CI**, and it is also the machine-readable
+hand-off signal, so it happens once, deliberately, when the session has real reason to believe the
+run will pass.
+
+**Verify the repo's actual trigger; don't assume.** Read `.github/workflows/*`. A PR workflow gated
+this way carries `ready_for_review` in its `pull_request` `types:` and a draft guard on the job
+(`if: github.event.pull_request.draft == false`, or the `github.event_name != 'pull_request' || …`
+form when the workflow also runs on `push`). If the repo's workflows instead run on every PR push,
+CI covers the draft phase too — keep the local gate anyway (it's cheaper and faster than a CI round
+trip) and treat each push's run as an extra check. A push to a draft that produces **no run at all**
+in a gated repo is the expected behavior, not a CI outage.
 
 ## The loop
 
 ```
-build on branch (worker, container)
-   └─ local gate: lint / type-check / tests green BEFORE pushing
-push
-   └─ CI runs ──► red ──► triage ──► fix worker ──► push ──► (CI again)
-                  │
-                green
-                   └─ code review runs, comments posted on the PR
-                        └─ blocking findings ──► fix worker ──► push ──► (CI again, then re-review)
-                        └─ clean + green ──► PR ready, hand to the human
+build on branch (worker, container)          ── PR is a DRAFT: CI does not run
+   └─ local gate: the pipeline's own checks, run in the container
+        ├─ red ──► triage ──► fix worker ──► (local gate again)
+        └─ green
+             └─ code review
+                  ├─ blocking findings ──► fix worker ──► (local gate again, then re-review)
+                  └─ clean + locally green
+                       └─ FLIP the PR to READY          ── this is what starts CI
+                            ├─ notify the human now (don't make them wait on the run)
+                            └─ CI watchdog stays armed on the post-flip run
+                                 ├─ green ──► merge-ready; the human merges
+                                 └─ red ──► triage FIRST, then:
+                                      ├─ ours ──► back to DRAFT, fix, re-gate, flip again
+                                      └─ not ours ──► stay READY, notify with the diagnosis
 ```
 
 Rules that make it work:
 
-- **Push when ready, not when finished-ish.** A worker runs the project's own lint, type-check and
-  test commands in the container first. Pushing to let CI find what a local run would have caught
-  wastes a whole CI cycle per mistake.
-- **CI is a gate, not a notification.** A push that goes red is the orchestrator's problem
-  immediately; it does not wait to be asked.
-- **Green before review.** Don't spend a review pass on code CI has already rejected — the review's
-  findings would be interleaved with build breakage and half of it may be rewritten anyway. Fix to
-  green first, then review. (Exception: if CI is red for a reason clearly unrelated to the change —
-  see "Triage" — reviewing in parallel is fine.)
-- **Review comments land on the PR.** The final review posts per-finding comments with file:line
-  and severity, plus one summary verdict comment, so the record is on the PR rather than in a
-  thread the human can't see.
+- **The local gate is the real gate.** While the PR is a draft, nothing else is checking the branch.
+  Run the project's own lint, type-check, tests, build, and security checks in the container, and
+  don't advance on "it should be fine."
+- **Green before review.** Don't spend a review pass on code the gate has already rejected — the
+  review's findings would be interleaved with build breakage and half of it may be rewritten anyway.
+  Fix to green first, then review.
+- **Review comments land on the PR.** The final review posts per-finding comments with file:line and
+  severity, plus one summary verdict comment, so the record is on the PR rather than in a thread the
+  human can't see.
 - **The orchestrator picks the review back up.** It reads the posted findings, decides what's
   blocking, and delegates those to a fix worker — it does not hand the human a list of comments to
   route.
-- **Any fix re-enters at CI.** A fix push means CI runs again and the affected review points get
-  re-checked. Never mark converged on the strength of a pre-fix green.
-- **Bound every loop.** ~3 CI-fix rounds on the same failure, ~2 review-fix rounds without
+- **Any fix re-enters at the gate.** A fix means the local gate runs again and the affected review
+  points get re-checked. Never mark converged on the strength of a pre-fix green.
+- **Flip once, and mean it.** Ready-for-review says two things at once: CI, start; human, look. Both
+  are wasted if the branch wasn't actually converged first.
+- **Bound every loop.** ~3 gate-fix rounds on the same failure, ~2 review-fix rounds without
   convergence, then stop and escalate with the diagnosis. A loop that isn't converging is signal.
 - **Log what the loop decided.** Fixes made without the human — especially anything that changed
   behavior rather than just satisfying a check — go in the decision log the human reads at sign-off.
+
+## The local gate — reconstruct the pipeline and run it
+
+The gate that runs while the PR is a draft is the pipeline's own gate, executed in the container.
+This is the same mechanism the loop falls back on when CI is down or absent; in a draft-gated repo
+it is simply the **normal** path for everything before the flip.
+
+- **Reconstruct it from the pipeline definition.** Read the workflow file(s) and run the same
+  commands the pipeline would — install, lint, type-check, unit/integration tests, build, and any
+  security or workflow linting the project runs (including `actionlint` on changed workflow files
+  and `shellcheck` on changed shell scripts). If there's no pipeline to read, use the project's own
+  documented commands (`CLAUDE.md`, `package.json` scripts, `Makefile`, `justfile`,
+  `pyproject.toml`).
+- **Know what it can't cover, and say so.** Some jobs genuinely can't run in the container — a
+  matrix across runners, a job needing a repo secret or a service the container can't reach, a
+  scanner that needs network access it doesn't have. Those are the residual risk the post-flip CI
+  run actually tests. List them in the sign-off package rather than implying the local gate proved
+  everything.
+- **Run it in a worker, not the conductor.** Same dispatch-plus-watchdog discipline; the gate is
+  just another worker whose output is a pass/fail plus failing excerpts.
+- **Keep the same rounds and bounds.** Local red → triage → fix worker → re-run locally → repeat,
+  bounded the same way. Review still runs after local green, and its fixes still re-enter at the
+  gate.
+- **Be explicit about what verified the change.** The PR and the sign-off package say the local gate
+  ran and which checks it ran — a human must never read "green" and assume CI produced it before the
+  flip.
+- **If the repo has no CI at all**, this loop is the whole story: converge locally, flip to ready
+  anyway (it's still the hand-off signal), and say plainly on the PR that no pipeline exists. Surface
+  the missing pipeline as a real gap rather than silently routing around it forever.
+
+## The flip, and the run that follows
+
+Flipping the PR from draft to ready is the session's hand-off, and in a gated repo it is also the
+event that triggers CI. Both halves matter:
+
+1. **Preconditions.** Local gate green on the PR head, final review clean on that same commit,
+   acceptance criteria met, decision log finalized. Not before.
+2. **Flip, then notify immediately.** Don't hold the sign-off package hostage to the CI run — the
+   human's review of the diff and the decision log can start while the pipeline runs. Say in the
+   notification that CI has just started, what it will run, and that merge should wait for green.
+3. **Keep the CI watchdog armed.** A CI run is **not** harness-tracked work — no completion
+   notification is coming for it. Register a wake-up sized to the pipeline's typical duration, check
+   the run non-blockingly, and re-arm with backoff while it's still running. The session is not done
+   at the flip; it is done when that run is green (or triaged and escalated).
+4. **A green first run is the expectation.** The local gate exists so the post-flip run confirms
+   rather than discovers. A red one means the local gate missed something — fix the branch *and*
+   note what the gate should have caught, so the next feature's gate covers it.
+
+### Post-flip red: triage before touching the PR's state
+
+**Never flip back to draft on a red run you haven't diagnosed.** The state change is a signal to the
+human, and flipping it on someone else's failure sends the wrong one. Classify first:
+
+- **Ours** — a test, lint, type, or build failure caused by the diff; a flake this change
+  introduced. → **Flip back to draft**, say why in a PR comment (the failing job and the diagnosis),
+  fix it through the normal loop, re-run the local gate, and flip to ready again with a fresh
+  notification. Draft is where fixing happens; leaving a known-broken PR sitting in the human's
+  queue is the thing this contract exists to prevent.
+- **Not ours** — GitHub Actions minutes or concurrency limits, a runner or provider outage, a rate
+  limit, an expired or missing repo secret, a pre-existing flake, or a failure that reproduces
+  identically on the base branch. → **Leave the PR ready** and **notify the user** with the
+  diagnosis: which job, why it isn't the code, and what would clear it (their action — topping up
+  minutes, rotating a credential — or simply a re-run once the provider recovers). Flipping back to
+  draft here would hide a mergeable PR behind a problem the code didn't cause and the session can't
+  fix.
+- **Unclear** — reproduce it against the local gate first. If the failure reproduces in the
+  container it's ours; if the branch is clean locally and the failure is environmental, treat it as
+  not-ours and say what you checked.
+
+Either way it goes on the PR once, not silently. And either way the round budget applies: ~3 rounds
+on the same failure, then escalate with the diagnosis rather than flipping back and forth.
 
 ## Watchdogs on both halves
 
 Every stage of this loop can go silent, and each needs its own backstop
 (`${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md` for the pattern):
 
-- **Worker watchdog.** Every fix/build/review subagent is dispatched in the background with a
+- **Worker watchdog.** Every fix/build/review/gate subagent is dispatched in the background with a
   watchdog sized to its expected duration. On fire: progressing → re-arm; silent → stop it, then
   re-dispatch; already done → proceed. Cap re-dispatches (~2) before escalating.
-- **CI watchdog.** A CI run is *not* harness-tracked work — no completion notification is coming
-  for it. After a push, register a wake-up sized to the pipeline's typical duration (use the
-  repo's recent run times; a few minutes for a small pipeline), then check the run's status
-  non-blockingly and re-arm with backoff while it's still running. Never busy-poll a run that
-  takes minutes, and never block the conductor on one.
-- **Queue stalls count as stalls.** A run that stays queued well past its normal window, or a push
-  that produced no run at all, is a CI-availability problem — not something to keep waiting on.
-  Treat it under "CI unavailable" below.
+- **CI watchdog.** Armed at the flip (and on any push while the PR is ready), sized to the
+  pipeline's typical duration — use the repo's recent run times. Never busy-poll a run that takes
+  minutes, and never block the conductor on one.
+- **Queue stalls count as stalls.** A run that stays queued well past its normal window is a
+  CI-availability problem — treat it as not-ours under the triage above, not as something to keep
+  waiting on. In a gated repo, remember that **no run at all while the PR is a draft is correct**;
+  it is only a stall if the PR is ready.
 
 ## Triage: whose failure is it?
 
-Before delegating a fix, classify the red. Getting this wrong burns rounds.
+Before delegating a fix — local gate or CI — classify the red. Getting this wrong burns rounds.
 
 - **Ours, deterministic** (test failure, lint/type error, build break caused by the diff) → fix
   worker, with the failing job's log excerpt and the command to reproduce locally in the brief.
 - **Ours, flaky** (passes on re-run, timing/order-dependent) → don't paper over it with a re-run
   alone; a flaky test the change introduced is a real finding. A pre-existing flake gets one
   re-run and a note.
-- **Not ours** (fails identically on the base branch, an upstream outage, a rate limit, an expired
-  credential) → say so once on the PR, don't burn rounds fixing it, and re-check when the base
-  recovers.
+- **Not ours** (fails identically on the base branch, an upstream outage, an Actions usage or
+  concurrency limit, a rate limit, an expired credential) → say so once on the PR, don't burn rounds
+  fixing it, and don't flip a ready PR back to draft for it. Notify the user and re-check when the
+  base or the provider recovers.
 - **Infrastructure/CI itself down** (no runner, workflow can't start, the provider is unavailable)
-  → switch to the local loop below.
-
-## When CI is unavailable — the loop lives inside Claude
-
-If CI is down, absent from the repo, or unreachable from the container, the loop does **not**
-pause and does **not** get handed to the human. Run the equivalent gate locally, in the container,
-and keep the same structure:
-
-- **Reconstruct the gate from the pipeline definition.** Read the workflow file(s) and run the same
-  commands the pipeline would — install, lint, type-check, unit/integration tests, build, and any
-  security or workflow linting the project runs. If there's no pipeline to read, use the project's
-  own documented commands (from `CLAUDE.md`, `package.json` scripts, `Makefile`, `pyproject.toml`).
-- **Run it in a worker, not the conductor.** Same dispatch-plus-watchdog discipline; the local
-  suite is just another worker whose output is a pass/fail plus failing excerpts.
-- **Keep the same rounds and bounds.** Local red → fix worker → re-run locally → repeat, bounded
-  the same way. Review still runs after local green, and its fixes still re-enter at the local
-  gate.
-- **Be explicit about what verified the change.** The PR and the sign-off package must say the
-  gate was run locally and which checks ran — a human must never read "green" and assume CI
-  produced it. Re-run through CI once it's back, before the PR is treated as merge-ready.
-- **Note the CI outage itself.** It's a real problem for the repo even if it isn't this feature's
-  problem; surface it rather than silently routing around it forever.
+  → the local gate is already the primary gate before the flip; after the flip, this is a not-ours
+  notification, not a fix loop.
 
 ## Anti-patterns
 
-- **Push-and-forget.** Leaving a red branch because the completion signal for a worker arrived and
-  nobody was watching the run.
-- **Handing CI failures to the human.** "CI is failing, what do you want to do?" is an escalation
-  only after triage says it's not ours or the round budget is spent.
+- **Flipping to ready to find out whether it works.** Ready-for-review is a claim, not a probe. Run
+  the gate locally first; a red first run costs the human a false alarm.
+- **Flipping back to draft on an undiagnosed red** — especially on an Actions limit or an outage,
+  which hides a mergeable PR behind a failure the code didn't cause.
+- **Leaving a known-broken PR ready** because flipping back felt like an admission. If the failure
+  is ours, draft is where the fix belongs.
+- **Push-and-forget.** Leaving a broken branch because a worker's completion signal arrived and
+  nobody ran the gate.
+- **Handing failures to the human before triage.** "CI is failing, what do you want to do?" is an
+  escalation only after triage says it's not ours or the round budget is spent.
 - **Reviewing a red branch** and then re-reviewing the rewrite — two passes for one review.
 - **Re-running until green.** Retrying a failing job without a diagnosis hides real flakiness and
   burns rounds.
 - **Blocking on CI.** Sitting in a foreground wait for a run instead of a watchdog-backed check.
-- **Declaring converged from a stale green.** A green from before the last fix push proves nothing.
-- **Stopping the loop because CI is down.** The gate moves into the container; the loop continues.
+- **Declaring converged from a stale green.** A green from before the last fix proves nothing.
+- **Treating "no CI run on my draft" as an outage.** In a gated repo that's the design.
+- **Ending the session at the flip.** The watchdog stays armed until the post-flip run resolves.
 
 ## See also
 
@@ -124,3 +210,4 @@ and keep the same structure:
   pattern every worker and the CI watch use.
 - `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — running independent fixes concurrently.
 - `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md` — the bar this loop converges on.
+- `${CLAUDE_PLUGIN_ROOT}/references/devops/cicd.md` — how the gated pipeline itself is wired.

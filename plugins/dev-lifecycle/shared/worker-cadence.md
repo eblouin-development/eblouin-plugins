@@ -37,7 +37,7 @@ The pattern is: dispatch → time-boxed liveness check → stop-and-re-dispatch.
 - Stopping a stalled worker → `TaskStop`.
 
 ## See also
-`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` — the push → CI → fix → review → fix loop this cadence backstops, including the CI watchdog (a CI run emits no completion notification at all) and the local fallback when CI is unavailable.
+`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` — the local gate → fix → review → fix loop this cadence backstops, and the CI watchdog armed when the PR is flipped to ready (a CI run emits no completion notification at all).
 
 `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — which workers may run at the same time, and the worktree isolation that makes it safe. This doc governs how you watch each of them.
 

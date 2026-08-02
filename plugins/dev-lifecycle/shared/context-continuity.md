@@ -19,7 +19,7 @@ Trigger at a **boundary**, not wherever the threshold happens to be crossed: a c
    - the feature issue, the PR, the branch, and the epic if there is one;
    - the execution plan with per-track status — done / in flight / not started;
    - **live workers**: what each is building, its task ID, and the watchdog armed on it with its fire time;
-   - **loop state**: whether CI-green and review-clean hold and on which commit, plus the round counters against their bounds (`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md`);
+   - **loop state**: the PR's draft/ready state, whether the local gate is green and the review clean and on which commit, any post-flip CI run in progress and the watchdog on it, plus the round counters against their bounds (`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md`);
    - decisions taken since the last brief, mirroring the PR decision log;
    - open findings not yet fixed, and which declared checkpoints have been passed or are still ahead;
    - **the single next action.**

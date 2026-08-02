@@ -29,6 +29,7 @@ If infra exists, conform. Otherwise pick the tier and say why:
 - **Small production** (freelance app, low traffic): a container PaaS (Fly.io, Render, Railway) or a single managed host — build/deploy/secrets/rollback bundled.
 - **Scaling production:** managed container service or Kubernetes, only when requirements justify it.
 - CI (build + test + scan gates) lives in GitHub Actions regardless of target.
+- **PR gates run only on pull requests that are ready for review** — the firm convention. Every PR-triggered workflow you write or touch carries the `ready_for_review` trigger type *and* a draft guard on the job; drafts are verified in the container instead (`${CLAUDE_PLUGIN_ROOT}/references/devops/cicd.md` for the exact wiring, `${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` for the loop that depends on it).
 
 ### 3. Build the pieces
 Load the reference for the piece:
@@ -52,4 +53,5 @@ Summarize what changed (Dockerfile, compose, workflows, IaC) and how to use it: 
 - Commit secrets or bake them into images.
 - Reach for Kubernetes when a simpler target (a home server, a PaaS) meets the requirement.
 - Wire a pipeline that deploys when gates fail.
+- Wire a PR gate that burns runner time on draft PRs, or one whose draft guard is only a `types:` filter (`synchronize` still fires on pushes to a draft).
 - Write the application code or its tests — it runs and ships them.

@@ -47,7 +47,7 @@ eblouin-plugins/
 │   │   ├── token-efficiency.md          # the efficiency doctrine every skill follows
 │   │   ├── worker-cadence.md            # how an orchestrator watches dispatched subagents (backstop cadence, not polling)
 │   │   ├── parallelization.md           # what work can run concurrently, and the worktree isolation that makes it safe
-│   │   ├── ci-convergence.md            # push → CI → fix → review → fix loop to green, with watchdogs and a CI-down fallback
+│   │   ├── ci-convergence.md            # the draft/ready contract: local gate → review → flip to ready (starts CI) → triage the run
 │   │   ├── context-continuity.md        # the 75% self-handoff: flush state, continuation brief, reload skills, resume uninterrupted
 │   │   ├── issue-cross-check.md         # every plan checked against the open backlog (closes/addresses/duplicates/conflicts) before approval
 │   │   └── definition-of-done.md        # the shared merge-ready bar
