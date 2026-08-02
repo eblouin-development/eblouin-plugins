@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "A development firm's lifecycle skills and a self-extending, version-aware reference library for Claude Code.",
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "plugins": [
     {
       "name": "dev-lifecycle",
       "source": "./plugins/dev-lifecycle",
       "description": "Full project lifecycle for the firm — planning, scaffolding/onboarding, build, review, testing, devops, docs, code walkthroughs/explainers, and a growing per-library reference library.",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "category": "development",
       "tags": [
         "fastapi",

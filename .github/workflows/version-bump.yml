@@ -6,10 +6,17 @@ name: version-bump
 #
 # Runs on label changes as well as pushes — relabelling a PR must re-check it,
 # otherwise a stale green would let a mislabelled bump through.
+#
+# Like every PR gate here it skips DRAFT pull requests and runs on the flip to
+# ready (plugins/dev-lifecycle/shared/ci-convergence.md). The bump is the last
+# thing done before that flip anyway, so there is nothing for this to check
+# while the PR is still a draft — and `scripts/check_version_bump.py` is the
+# local equivalent to run in the container beforehand.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types:
+      [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
     branches: [main]
 
 permissions:
@@ -19,6 +26,7 @@ jobs:
   # Job name is the check name — keep it `version-bump` so it matches the
   # required-status-check instructions in README.md and the skill.
   version-bump:
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

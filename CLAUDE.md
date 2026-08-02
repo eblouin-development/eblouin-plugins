@@ -20,6 +20,10 @@ Two rules from it that are easy to violate before reading it:
   bumps it after merge.
 - **Every PR carries exactly one `release:major|minor|patch|none` label** — CI
   checks the bump against it; there is no default.
+- **CI runs on ready-for-review PRs only** — while the PR is a draft, verify in
+  the container (validator, template tests, `actionlint`, the bump check) and
+  flip to ready only once that's green. The flip starts CI and hands the PR to
+  the owner; if the run then goes red, triage before changing the PR's state.
 
 ## Pull requests
 

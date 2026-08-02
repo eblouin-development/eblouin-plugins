@@ -20,6 +20,7 @@ should sanity-check rather than assume) — or "none" if there weren't any.
 - [ ] Exactly one `release:major` / `release:minor` / `release:patch` / `release:none` label is set on this PR
 - [ ] This PR carries the version bump the label implies, computed from `main`'s current version, in all three fields (`plugin.json`, `marketplace.json` `metadata.version`, and the `dev-lifecycle` entry) — or the version is untouched for `release:none`
 - [ ] Docs updated where relevant (root `README.md`, `docs/SETUP-AND-USAGE.md`, or an ADR for a significant decision)
+- [ ] Verified in the container before this PR was flipped to ready — CI here skips draft PRs, so the flip is what starts it and it should come back green
 
 There is no post-merge release job: the version this PR carries is published the
 moment it merges, and can only be corrected by another PR (see

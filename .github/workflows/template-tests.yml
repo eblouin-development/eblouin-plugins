@@ -57,7 +57,11 @@ name: template-tests
 # with no template PR to have caught it.
 
 on:
-  pull_request: {}
+  pull_request:
+    # `ready_for_review` makes the flip to ready trigger the suite; the draft
+    # guard on `changes` below is what keeps it off drafts, which are gated in
+    # the container instead (plugins/dev-lifecycle/shared/ci-convergence.md).
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   schedule:
@@ -80,8 +84,15 @@ jobs:
   # against; schedule/workflow_dispatch always run everything (see the
   # downstream jobs' own `if:`), so this job is skipped for those triggers
   # and its (unset) output is never consulted.
+  # The draft guard lives here rather than on each test job: on a draft PR this
+  # job is skipped, its `templates` output is unset, and every downstream job's
+  # `if:` therefore evaluates false and skips too. `template-tests-required`
+  # still runs (`if: always()`) and passes, since nothing failed.
   changes:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false) ||
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       templates: ${{ steps.filter.outputs.templates }}

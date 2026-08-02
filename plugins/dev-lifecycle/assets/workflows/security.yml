@@ -18,11 +18,19 @@
 # Per the firm definition-of-done, this is a REQUIRED check: a red gate
 # blocks merge. Make it a required status check in branch protection when
 # wiring up a new repo (see the devops/scaffolding skills).
+#
+# On DRAFT pull requests every job is skipped — the firm gates drafts in the
+# container instead, and the flip to ready re-runs all of this for real. A
+# skipped job satisfies branch protection, which is harmless because GitHub
+# won't merge a draft PR anyway.
 
 name: Security gate
 
 on:
   pull_request:
+    # `ready_for_review` is what makes flipping a draft PR to ready trigger the
+    # gate; the per-job draft guard below is what keeps it off draft PRs.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -32,6 +40,11 @@ permissions:
 jobs:
   sast:
     name: SAST (bandit + semgrep)
+    # Draft PRs are gated in the container, not on runners — see
+    # references/devops/cicd.md "When the PR gates run". The guard (not the
+    # `types:` filter alone) is what excludes them: `synchronize` fires on
+    # every push to a draft. Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +92,11 @@ jobs:
 
   secrets:
     name: Secret scanning (gitleaks)
+    # Draft PRs are gated in the container, not on runners — see
+    # references/devops/cicd.md "When the PR gates run". The guard (not the
+    # `types:` filter alone) is what excludes them: `synchronize` fires on
+    # every push to a draft. Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +118,11 @@ jobs:
 
   deps:
     name: Dependency CVE scan
+    # Draft PRs are gated in the container, not on runners — see
+    # references/devops/cicd.md "When the PR gates run". The guard (not the
+    # `types:` filter alone) is what excludes them: `synchronize` fires on
+    # every push to a draft. Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -172,6 +195,11 @@ jobs:
 
   iac:
     name: IaC scan (checkov)
+    # Draft PRs are gated in the container, not on runners — see
+    # references/devops/cicd.md "When the PR gates run". The guard (not the
+    # `types:` filter alone) is what excludes them: `synchronize` fires on
+    # every push to a draft. Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -203,6 +231,11 @@ jobs:
 
   containers:
     name: Container scan (trivy)
+    # Draft PRs are gated in the container, not on runners — see
+    # references/devops/cicd.md "When the PR gates run". The guard (not the
+    # `types:` filter alone) is what excludes them: `synchronize` fires on
+    # every push to a draft. Unset on `push`, hence the event-name check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
