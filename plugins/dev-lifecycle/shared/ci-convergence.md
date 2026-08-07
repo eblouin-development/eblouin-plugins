@@ -54,7 +54,9 @@ build on branch (worker, container)          ── PR is a DRAFT: CI does not r
                                  ├─ green ──► merge-ready; the human merges
                                  └─ red ──► triage FIRST, then:
                                       ├─ ours ──► back to DRAFT, fix, re-gate, flip again
-                                      └─ not ours ──► stay READY, notify with the diagnosis
+                                      ├─ Actions/provider down ──► confirm with the user,
+                                      │     back to DRAFT, converge fully, flip once when ready
+                                      └─ other not-ours ──► stay READY, notify with the diagnosis
 ```
 
 Rules that make it work:
@@ -86,17 +88,27 @@ The gate that runs while the PR is a draft is the pipeline's own gate, executed 
 This is the same mechanism the loop falls back on when CI is down or absent; in a draft-gated repo
 it is simply the **normal** path for everything before the flip.
 
-- **Reconstruct it from the pipeline definition.** Read the workflow file(s) and run the same
-  commands the pipeline would — install, lint, type-check, unit/integration tests, build, and any
-  security or workflow linting the project runs (including `actionlint` on changed workflow files
-  and `shellcheck` on changed shell scripts). If there's no pipeline to read, use the project's own
-  documented commands (`CLAUDE.md`, `package.json` scripts, `Makefile`, `justfile`,
-  `pyproject.toml`).
+- **Reconstruct it from the pipeline definition — job by job, step by step.** Read the workflow
+  file(s) and run the same commands the pipeline would, in the same order: install, lint,
+  type-check, unit/integration tests, build, and any security or workflow linting the project runs
+  (including `actionlint` on changed workflow files and `shellcheck` on changed shell scripts). If
+  there's no pipeline to read, use the project's own documented commands (`CLAUDE.md`,
+  `package.json` scripts, `Makefile`, `justfile`, `pyproject.toml`).
+- **Never substitute the repo's convenience target for the workflow.** `make check`, `npm run
+  verify` and their kin drift from CI, and the steps they omit are disproportionately the ones that
+  catch real breakage — a formatter check, an asset-manifest guard, a schema-drift check. Diff the
+  convenience target against the workflow's steps; **if they disagree, that is a finding worth
+  filing**, and the workflow wins in the meantime. An observed case: `make check` was documented as
+  "exactly what CI gates on" while omitting the one guard that would have caught that PR's most
+  likely failure.
 - **Know what it can't cover, and say so.** Some jobs genuinely can't run in the container — a
-  matrix across runners, a job needing a repo secret or a service the container can't reach, a
-  scanner that needs network access it doesn't have. Those are the residual risk the post-flip CI
-  run actually tests. List them in the sign-off package rather than implying the local gate proved
-  everything.
+  matrix across runners, a Docker build with no daemon available, a job needing a repo secret or a
+  service the container can't reach, a scanner without network access. Those are the residual risk
+  the post-flip CI run actually tests. Report them as **unverified**, in their own line, never
+  folded into a table of green rows (`${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md`).
+- **Name the environment gap when there is one.** A suite run against a different database version,
+  runtime, or OS than production pins is evidence about *this* environment. Say which, so the
+  difference is the reader's to weigh.
 - **Run it in a worker, not the conductor.** Same dispatch-plus-watchdog discipline; the gate is
   just another worker whose output is a pass/fail plus failing excerpts.
 - **Keep the same rounds and bounds.** Local red → triage → fix worker → re-run locally → repeat,
@@ -171,6 +183,72 @@ Every stage of this loop can go silent, and each needs its own backstop
 
 Before delegating a fix — local gate or CI — classify the red. Getting this wrong burns rounds.
 
+**Suspect the provider first when the run failed too fast or waited too long.** Jobs that fail
+within seconds of starting never ran anything, and a red check from a job that never ran carries no
+information about the code. Treat either of these as the trigger to run the check below, before any
+fix worker is dispatched:
+
+- the run failed **almost immediately** (seconds, not minutes), or
+- the run sat **far past its normal queue window** and then failed.
+
+Both are the same underlying condition — no runner was ever assigned — surfacing differently
+depending on how long the job sat first. Do not use duration alone as the test: the identical outage
+has produced 2-second failures on one branch and 67–88-minute queued failures on another, and a
+threshold-only rule misclassified the slow one as a real failure.
+
+### Confirming an Actions/provider failure
+
+Gather the evidence, then decide. Any of these on their own is suggestive; together they are
+conclusive:
+
+- **No runner was assigned** — the job reports `runner_id: 0` and an empty `runner_name`.
+- **No output exists** — the check run's `output.title`/`summary`/`text` are empty, and fetching the
+  job's logs returns 404. A job that produced no logs produced no result.
+- **Unrelated jobs failed identically.** Three jobs with nothing in common failing in the same
+  second is infrastructure, not three simultaneous bugs.
+- **The failing job has none of this diff's files in scope.** A frontend job failing on a
+  Python-only diff cannot be attributable to it — confirm with
+  `git diff --name-only <base>...HEAD` against that job's paths.
+- **It reproduces on the base branch.** Recent runs on the base failing the same way — especially
+  the exact commit this branch is based on — means it predates the change.
+- **The account or org is out of Actions minutes**, or Actions is disabled by policy. Blocked jobs
+  are reported as **failed**, not as never-started, which is what makes this look like a code
+  failure.
+
+**State the evidence, not the conclusion.** Write down what was checked and what it showed, so a
+wrong call is visibly wrong and can be corrected against the record. Triage of this kind has been
+wrong before and needed a public correction; the evidence list is what makes that cheap.
+
+### The Actions-failure protocol
+
+Once the evidence points at the provider rather than the diff:
+
+1. **Ask the user to confirm**, presenting the evidence gathered above and the diagnosis drawn from
+   it. This is the one CI condition worth a question, because the wrong call sends a fix worker
+   after a bug that does not exist — or leaves a real failure unfixed.
+2. **Do not block on the answer.** Return the PR to **draft** immediately and keep converging
+   locally; that work is productive under either answer. The user's reply only decides where it ends
+   up.
+3. **Draft is where it stays** until the local gate is green *and* the review is clean — the full
+   normal bar. A dead pipeline is not a reason to lower it; it is a reason to stop using the flip as
+   a probe.
+4. **Flip when the work is genuinely ready**, once and deliberately, and say plainly on the PR that
+   the gate was local, exactly which checks ran, and which jobs have no local substitute and are
+   therefore unverified (`${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md`). If the flip's run
+   fails the same way, that is the known outage — record it once and leave the PR ready; do not
+   re-enter the loop.
+5. **If the user says it is not an Actions failure**, treat the red as ours and run the normal
+   fix loop from draft.
+6. **If no answer arrives**, default to this protocol. Staying in draft and continuing to converge
+   is the non-destructive choice — it never hands the human a broken PR and never chases a
+   phantom bug.
+
+This is deliberately different from other not-ours failures (a pre-existing flake, an expired
+secret, a failure reproducing on the base branch of an otherwise-healthy pipeline), where the PR
+**stays ready** and the user just gets the diagnosis. The distinction is whether the pipeline can
+still produce a verdict at all: if it can, a ready PR with one explained red check is honest; if it
+cannot, ready would be claiming a verification that no longer exists.
+
 - **Ours, deterministic** (test failure, lint/type error, build break caused by the diff) → fix
   worker, with the failing job's log excerpt and the command to reproduce locally in the brief.
 - **Ours, flaky** (passes on re-run, timing/order-dependent) → don't paper over it with a re-run
@@ -181,8 +259,9 @@ Before delegating a fix — local gate or CI — classify the red. Getting this 
   fixing it, and don't flip a ready PR back to draft for it. Notify the user and re-check when the
   base or the provider recovers.
 - **Infrastructure/CI itself down** (no runner, workflow can't start, the provider is unavailable)
-  → the local gate is already the primary gate before the flip; after the flip, this is a not-ours
-  notification, not a fix loop.
+  → confirm it against the evidence list above, ask the user, and run the Actions-failure protocol:
+  back to draft, converge fully locally, flip once when genuinely ready. Not a fix loop, and not a
+  ready PR sitting on a red check the pipeline can never clear.
 
 ## Anti-patterns
 
@@ -199,6 +278,11 @@ Before delegating a fix — local gate or CI — classify the red. Getting this 
 - **Reviewing a red branch** and then re-reviewing the rewrite — two passes for one review.
 - **Re-running until green.** Retrying a failing job without a diagnosis hides real flakiness and
   burns rounds.
+- **Dispatching a fix worker at a job that never ran.** A red check from a job with no runner, no
+  logs and no output is not a failing test — chasing it invents a bug and burns a round finding
+  nothing.
+- **Using the flip as a probe when the pipeline is dead.** If CI cannot produce a verdict, flipping
+  to ready claims a verification that doesn't exist. Converge in draft and flip once, when done.
 - **Blocking on CI.** Sitting in a foreground wait for a run instead of a watchdog-backed check.
 - **Declaring converged from a stale green.** A green from before the last fix proves nothing.
 - **Treating "no CI run on my draft" as an outage.** In a gated repo that's the design.
@@ -210,4 +294,7 @@ Before delegating a fix — local gate or CI — classify the red. Getting this 
   pattern every worker and the CI watch use.
 - `${CLAUDE_PLUGIN_ROOT}/shared/parallelization.md` — running independent fixes concurrently.
 - `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md` — the bar this loop converges on.
+
+`${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md` — how the gate's results are proven and
+reported, including what "unverified" must never be folded into.
 - `${CLAUDE_PLUGIN_ROOT}/references/devops/cicd.md` — how the gated pipeline itself is wired.
