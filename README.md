@@ -50,6 +50,7 @@ eblouin-plugins/
 │   │   ├── ci-convergence.md            # the draft/ready contract: local gate → review → flip to ready (starts CI) → triage the run
 │   │   ├── context-continuity.md        # the 75% self-handoff: flush state, continuation brief, reload skills, resume uninterrupted
 │   │   ├── issue-cross-check.md         # every plan checked against the open backlog (closes/addresses/duplicates/conflicts) before approval
+│   │   ├── verification-evidence.md     # proving a change works: the reproduction gate, can-this-test-fail, verified vs unverified
 │   │   └── definition-of-done.md        # the shared merge-ready bar
 │   ├── templates/                       # golden-path starter kit: composable blocks + catalog components
 │   │   ├── <layer>/<name>/README.md     # a block (e.g. backend/fastapi) — composition contract (needs/exposes) + doc fragment

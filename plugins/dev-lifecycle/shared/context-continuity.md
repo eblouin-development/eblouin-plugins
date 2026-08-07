@@ -22,6 +22,7 @@ Trigger at a **boundary**, not wherever the threshold happens to be crossed: a c
    - **loop state**: the PR's draft/ready state, whether the local gate is green and the review clean and on which commit, any post-flip CI run in progress and the watchdog on it, plus the round counters against their bounds (`${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md`);
    - decisions taken since the last brief, mirroring the PR decision log;
    - open findings not yet fixed, and which declared checkpoints have been passed or are still ahead;
+   - **environment facts a resuming session would otherwise rediscover the hard way** — the interpreter or toolchain version the repo actually needs, services that must be started by hand, a gate that can't be run concurrently, credentials or fixtures that have to be set up first. These cost real time to re-learn and are invisible in the issue and the diff;
    - **the single next action.**
 
    Write it for a reader with no memory of the session — because that reader is either you after the handoff or a different session tomorrow.
@@ -49,3 +50,5 @@ The pattern is: **watch the gauge → flush to durable artifacts → write a sel
 `${CLAUDE_PLUGIN_ROOT}/shared/worker-cadence.md` — the watchdogs the brief records and the resumed session re-arms.
 
 `${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` — the loop state (green/clean, round counters) a handoff must not drop.
+
+`${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md` — open findings recorded in the brief carry their evidence, so the resuming session re-verifies rather than re-assumes.

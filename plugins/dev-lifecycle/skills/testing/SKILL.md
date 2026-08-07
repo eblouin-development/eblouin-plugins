@@ -16,6 +16,8 @@ The guiding idea: **test behavior and contracts, not internals.** A good test de
 - **Respect the pyramid.** Many fast unit tests, a meaningful layer of integration tests, a few high-value e2e tests on critical flows. Don't invert it.
 - **Deterministic, isolated, independent.** No order dependence, no shared mutable state, no reliance on wall-clock/network/randomness unless controlled. A flaky test is a broken test.
 - **Cover the unhappy paths.** Errors, edge cases, empty/null inputs, validation and auth failures, boundaries.
+- **Every test must be shown to fail.** A test that cannot fail is worse than none — it holds the slot a real guard would occupy and reports green forever. Demonstrate red before green: break the thing on purpose (or revert the fix) and confirm this test notices, with the failure message the bug predicts. The procedure, and the ways the check itself silently no-ops, are in `${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md`.
+- **Assert the specific thing, not a substring of the page.** Pin the interpolated value belonging to *this* case, not a marker that three other elements also carry. A whole-page or whole-file `in` check passes regardless of what happens to the subject under test.
 - **Coverage is a tool, not a target.** Meaningful coverage of logic and risk, not a vanity percentage. The project's threshold is a CI floor, not the goal.
 - **Work context-efficiently.** Detect setup from config/manifest; test the changed surface, not the whole tree. See `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md`.
 
@@ -36,6 +38,10 @@ Structure each test Arrange–Act–Assert; one behavior per test; name so a fai
 
 ### 4. TDD (when chosen)
 Red → green → refactor: a failing test pinning the behavior, minimum code to pass, then refactor with the test as a net. Offer it for well-specified logic; not mandatory for exploratory/UI-polish work.
+
+TDD gets the red phase for free. **When the test is written after the code — a regression test on an already-applied fix, or coverage added to existing behavior — the red phase has to be manufactured**, and that is exactly when a can't-fail test slips through. Revert the source (never `git stash push <paths>`, which no-ops on a committed tree and produces a false pass) or strip the specific thing being pinned, watch the test fail with the expected message, restore, watch it pass. Record both results. Full procedure: `${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md`.
+
+Also confirm the test can execute where it is meant to gate. A suite whose runner or browser isn't installed in CI **skips** rather than fails — green, and guarding nothing.
 
 ### 5. Hand off
 Summarize what's tested, at which levels, and gaps left (and why). Confirm the suite runs clean and is wired into how the project runs tests so the devops gate picks it up — part of `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md`.
