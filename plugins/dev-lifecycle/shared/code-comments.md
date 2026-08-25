@@ -22,6 +22,10 @@ file the reader cannot see, and it rots into an outright lie as the code keeps m
   this file? If it's only meaningful relative to a previous state or to the conversation that
   produced the edit, it is change narration — delete it, or rewrite it as a statement about the
   present ("handles Y" instead of "changed to handle Y").
+- **A comment that reads like a changelog entry is a changelog entry in the wrong place.** If the
+  information matters, it belongs in the PR description, the decision log, the issue, or the
+  changelog — move it there, then delete the comment. If it says nothing those records don't
+  already say, just delete it.
 - **A real, current constraint is not history.** "Kept for compatibility with clients on API v1"
   states a live constraint and belongs; "kept from the old implementation" states history and
   doesn't. If the constraint is real, name the constraint — not the change that ran into it.
