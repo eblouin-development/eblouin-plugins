@@ -34,7 +34,7 @@ Load the reference for the layer:
 - **Backend** → `${CLAUDE_PLUGIN_ROOT}/references/testing/backend-testing.md`.
 - **Frontend** → `${CLAUDE_PLUGIN_ROOT}/references/testing/frontend-testing.md`.
 
-Structure each test Arrange–Act–Assert; one behavior per test; name so a failure reads like a sentence; assert specific values; use factories/fixtures; mock only at the boundary (external network, time, third-party) — never your own internal code.
+Structure each test Arrange–Act–Assert; one behavior per test; name so a failure reads like a sentence; assert specific values; use factories/fixtures; mock only at the boundary (external network, time, third-party) — never your own internal code. Test code is code: comment it per `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md` — helpers and fixtures get doc comments, unusual setups get a why, and no comment narrates what a test used to check.
 
 ### 4. TDD (when chosen)
 Red → green → refactor: a failing test pinning the behavior, minimum code to pass, then refactor with the test as a net. Offer it for well-specified logic; not mandatory for exploratory/UI-polish work.

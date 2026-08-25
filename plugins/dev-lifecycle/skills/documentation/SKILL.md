@@ -7,7 +7,7 @@ description: "Write and maintain technical documentation for a codebase — READ
 
 Write docs a real reader can act on, and that stay true to the code. The failure mode of documentation isn't being too sparse — it's being *wrong*: stale docs that describe code that no longer exists are worse than none. So the job is twofold: write the right doc for the reader, and keep it close enough to the code that it stays current.
 
-Guiding idea: **document the *why*, not the *what*.** The code shows what it does; documentation captures intent, tradeoffs, constraints, and the reasoning behind a decision. A comment that restates the code is noise; one that explains why the obvious approach was rejected is gold.
+Guiding idea: **document the *why*, not the *what* — and always the present, never the past.** The code shows what it does; documentation captures intent, tradeoffs, constraints, and the reasoning behind a decision. A comment that restates the code is noise; one that explains why the obvious approach was rejected is gold; one that narrates what the code used to do or how it changed is worse than either — the change's story belongs in git history and the PR, not the source. For inline comments and doc-comment coverage the firm-wide rule is `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md`.
 
 ## Core rules
 

@@ -124,7 +124,7 @@ Brief the subagent with: the issue number, this step's slice of the plan and its
 **The canon block — verbatim in every build, fix, and review brief:**
 
 - **The skill to invoke, plugin-qualified**, as the first action before any code is written or judged: "invoke the `dev-lifecycle:<name>` skill via the Skill tool" (e.g. `dev-lifecycle:backend`, `dev-lifecycle:frontend`, `dev-lifecycle:testing`, `dev-lifecycle:code-review`). Name it in the invocable form, not as "the backend skill."
-- **The shared doctrines that govern its conduct**, by path: `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md` (the bar), `${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md` (how a fix or test is proven), and `${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` for any worker that runs the gate or pushes.
+- **The shared doctrines that govern its conduct**, by path: `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md` (the bar), `${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md` (how a fix or test is proven), `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md` (comments describe current behavior and intent only — doc comments on every function/class, never a narration of what changed), and `${CLAUDE_PLUGIN_ROOT}/shared/ci-convergence.md` for any worker that runs the gate or pushes.
 - **The project's own canon**: read the repo's `CLAUDE.md` (and any nested one covering the files in scope) and load any project-local skills before writing code. A repo-specific rule — "`.env.example` documents every var", a named commit convention, a required migration pattern — is invisible to a subagent that never opened it, and violating one is a review finding that costs a full round.
 - **The instruction to report skills loaded** (see below).
 
