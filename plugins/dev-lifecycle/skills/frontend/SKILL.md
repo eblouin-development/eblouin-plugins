@@ -39,7 +39,7 @@ If a stack exists, step 1 already decided. Only when starting fresh: reach for *
   - **Server-rendered + HTMX** → `${CLAUDE_PLUGIN_ROOT}/references/frontend/htmx.md` (+ `tailwind.md` for styling). Pairs with the backend skill's Django path.
 - If a significant UI library has **no reference yet**, generate one from current official docs, use it now, and PR it into the plugin (self-extend flow).
 
-Both paths: match existing conventions; accessibility is not optional (semantic HTML, labels, keyboard operability, focus management, contrast, alt text); handle loading/empty/error states; keep components/templates small; if TypeScript is present, type honestly (no `any` escape hatch).
+Both paths: match existing conventions; accessibility is not optional (semantic HTML, labels, keyboard operability, focus management, contrast, alt text); handle loading/empty/error states; keep components/templates small; if TypeScript is present, type honestly (no `any` escape hatch); comment per `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md` — doc comments on every component/hook/function (purpose, usage, props/data shapes), a why-comment wherever the code is unusual, never a comment narrating what changed, and comments in touched code updated in the same commit.
 
 ### 4. Hand off
 Summarize what changed (files, components, routes) so it's reviewable. Note anything to verify (a visual result, a route needing a backend endpoint) and follow-ups left out of scope. The bar for merge-ready is `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md`.

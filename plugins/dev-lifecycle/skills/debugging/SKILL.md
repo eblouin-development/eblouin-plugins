@@ -18,6 +18,7 @@ The other half is honesty about cause: a fix that makes the symptom disappear is
 - **Root cause, not symptom.** Keep asking "why" until you can explain the full causal chain and toggle the bug on and off deliberately.
 - **Mitigate before you investigate (production).** If live users are harmed, stop the bleeding first — roll back, flip a flag, fail over — then root-cause at a sane pace.
 - **Close the loop, and prove it closed.** Once fixed, add a regression test and *demonstrate* it red before green — revert the source (never `git stash push <paths>`, which no-ops on a committed tree), watch the test fail with the message the bug predicts, restore, watch it pass, record both. A fix that was never seen failing is unproven (`${CLAUDE_PLUGIN_ROOT}/shared/verification-evidence.md`).
+- **The fix's comments describe the present, not the bug hunt.** Never leave "fixed the race here", "was previously off by one", or any narration of what the code used to do — the bug's story lives in the commit, the issue, and the regression test. If the corrected code is non-obvious, comment the *current* constraint that makes it right ("processed before X because Y holds the lock"), and update any comments the fix made stale (`${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md`).
 - **Work context-efficiently.** Localize with search and targeted reads; isolate a heavy investigation in a subagent so its exploration doesn't flood the main context. See `${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md`.
 
 ## Workflow

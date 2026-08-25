@@ -41,7 +41,7 @@ Settle the API contract before handlers: routes, methods, request/response schem
   - **Claude / LLM integration (Anthropic SDK):** `${CLAUDE_PLUGIN_ROOT}/references/backend/anthropic.md` when the project calls Claude via the `anthropic` SDK (Messages API, thinking/effort, streaming, tool use, caching).
 - If a significant library in the project has **no reference yet**, generate one from current official docs, use it now, and open a PR to add it to the plugin (see the onboarding/self-extend flow).
 
-Expectations: match existing conventions; separate concerns (routing/validation → route layer, business logic → services, persistence → data layer); handle errors with correct status codes and non-leaky messages; type everything; every schema change gets a migration.
+Expectations: match existing conventions; separate concerns (routing/validation → route layer, business logic → services, persistence → data layer); handle errors with correct status codes and non-leaky messages; type everything; every schema change gets a migration; comment per `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md` — doc comments on every function/method/class (purpose, usage, data shapes), a why-comment wherever the code is unusual, never a comment narrating what changed or what used to be there, and comments in touched code updated in the same commit.
 
 ### 4. Hand off
 Summarize what changed (routes, schemas, models, migrations) and state the API contract for new/changed endpoints so the frontend can build against it. Note migrations to run and anything left out of scope. The bar for merge-ready is `${CLAUDE_PLUGIN_ROOT}/shared/definition-of-done.md`.

@@ -1,7 +1,7 @@
 <!--
 library: code-review
 versions-covered: "n/a"
-last-verified: 2026-08-07
+last-verified: 2026-08-25
 provenance: manual
 sources: []
 -->
@@ -79,6 +79,12 @@ They are read as guarantees by the next person, and they drift silently because 
   multi-step change.
 - **PR-body claims count.** Names, file paths, and "this keeps resolving" assurances in the
   description get checked against the diff like anything else.
+- **Change-narration comments are findings on sight.** A comment describing what the code *used* to
+  do or how it changed — "previously…", "changed from X to Y", "now uses…", "removed the old…",
+  "updated per review" — describes a version of the file the next reader cannot see, and rots into
+  a lie as the code moves. The change's story belongs in git history and the PR, never in the
+  source. Flag it and have it deleted or rewritten as a statement about the present
+  (`${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md`).
 
 ## Best practices & conventions
 "Best practice" = idiomatic for this stack/version AND consistent with this codebase. Defer to the project; the `frontend` and `backend` skills define the substantive standards.
@@ -87,6 +93,7 @@ They are read as guarantees by the next person, and they drift silently because 
 - **Consistency:** matches existing naming, file/folder structure, error-handling style, and patterns. A change that's "good" but alien to the codebase still adds friction.
 - **Separation of concerns:** business logic out of route handlers and components; presentation separate from data access; single-responsibility units.
 - **Readability:** clear names, reasonable function size, no dead code, no leftover debug prints/`console.log`, no commented-out blocks shipped.
+- **Comment hygiene** (`${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md`): every new/changed function, method, and class carries a doc comment (purpose, usage, data shapes); genuinely unusual code carries a present-tense why; comments in touched code were updated with the change rather than left stale; and nothing narrates the change itself (that class of comment is covered under "Claim vs. code" above).
 - **Typing:** honest types, no `any`/`# type: ignore` as an escape hatch, no silenced linters hiding real issues.
 - **Magic values & config:** constants named, configuration not hardcoded.
 

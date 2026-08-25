@@ -15,6 +15,7 @@ Two related jobs, done consistently across projects: **seed data** (realistic de
 - **Don't leak.** Reports and exports exclude secrets and unnecessary PII; scope each to exactly what the consumer needs.
 - **Consistency across projects.** Same seeding and reporting patterns everywhere — idempotent seed scripts, standard export formats, testable reports.
 - **Work context-efficiently.** Read the models and existing factories/reports, not the whole codebase (`${CLAUDE_PLUGIN_ROOT}/shared/token-efficiency.md`).
+- **Comment like production code.** Seed scripts, factories, reports, and instrumentation follow `${CLAUDE_PLUGIN_ROOT}/shared/code-comments.md` — doc comments on functions/classes, why-comments for unusual code, no change-history narration.
 
 ## Workflow
 
